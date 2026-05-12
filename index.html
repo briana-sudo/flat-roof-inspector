@@ -2746,6 +2746,78 @@ function parseAddressComponents(addr) {
   return {num: m[1], street: normalizeStreetName(m[2])};
 }
 
+// ============================================================
+// parseCSZ — Shape B (Phase 1 H2 fix, May 12 2026)
+// Verified by test/phase1_h2_parseCSZ_test.html (121/121 PASS).
+// Replaces the inline split('","\\s+") parser that lived in createRegistryRow.
+// Handles canonical "City, ST ZIP", spelled-out state ("Akron, Ohio 44313"),
+// no-comma form, extra-comma form, multi-word states ("New York", "West Virginia"),
+// ZIP+4. Rejects unknown 2-letter tokens (state stays '', token remains in city).
+// ============================================================
+var US_STATE_NAMES = {
+  'alabama':'AL','alaska':'AK','arizona':'AZ','arkansas':'AR','california':'CA',
+  'colorado':'CO','connecticut':'CT','delaware':'DE','florida':'FL','georgia':'GA',
+  'hawaii':'HI','idaho':'ID','illinois':'IL','indiana':'IN','iowa':'IA',
+  'kansas':'KS','kentucky':'KY','louisiana':'LA','maine':'ME','maryland':'MD',
+  'massachusetts':'MA','michigan':'MI','minnesota':'MN','mississippi':'MS','missouri':'MO',
+  'montana':'MT','nebraska':'NE','nevada':'NV','new hampshire':'NH','new jersey':'NJ',
+  'new mexico':'NM','new york':'NY','north carolina':'NC','north dakota':'ND','ohio':'OH',
+  'oklahoma':'OK','oregon':'OR','pennsylvania':'PA','rhode island':'RI','south carolina':'SC',
+  'south dakota':'SD','tennessee':'TN','texas':'TX','utah':'UT','vermont':'VT',
+  'virginia':'VA','washington':'WA','west virginia':'WV','wisconsin':'WI','wyoming':'WY',
+  'district of columbia':'DC'
+};
+var US_STATE_ABBREVS = Object.keys(US_STATE_NAMES).map(function(k){return US_STATE_NAMES[k];});
+
+function parseCSZ(input) {
+  if (!input || typeof input !== 'string') return {city:'', state:'', zip:''};
+  var s = input.trim();
+  if (!s) return {city:'', state:'', zip:''};
+  // Step 1: strip trailing ZIP (5 or 9 digit, optional dash)
+  var zip = '';
+  var zipMatch = s.match(/(\d{5}(?:-\d{4})?)\s*$/);
+  if (zipMatch) {
+    zip = zipMatch[1];
+    s = s.substring(0, zipMatch.index).trim();
+    if (s.charAt(s.length-1) === ',') s = s.substring(0, s.length-1).trim();
+  }
+  // Step 2: try full state name match (longest match wins — multi-word names beat substrings)
+  var state = '';
+  var sLower = s.toLowerCase();
+  var matchedName = null;
+  var matchedLen = 0;
+  Object.keys(US_STATE_NAMES).forEach(function(name){
+    var idx = sLower.lastIndexOf(name);
+    if (idx === -1) return;
+    if (idx + name.length !== sLower.length) return;
+    if (idx > 0) {
+      var prev = sLower.charAt(idx-1);
+      if (prev !== ' ' && prev !== ',') return;
+    }
+    if (name.length > matchedLen) { matchedName = name; matchedLen = name.length; }
+  });
+  if (matchedName) {
+    state = US_STATE_NAMES[matchedName];
+    s = s.substring(0, s.length - matchedName.length).trim();
+    if (s.charAt(s.length-1) === ',') s = s.substring(0, s.length-1).trim();
+  } else {
+    // Step 3: 2-letter abbrev with strict word-boundary, validated against official 50+DC list
+    var abbrevMatch = s.match(/(?:^|[\s,])([A-Za-z]{2})\s*$/);
+    if (abbrevMatch) {
+      var candidate = abbrevMatch[1].toUpperCase();
+      if (US_STATE_ABBREVS.indexOf(candidate) !== -1) {
+        state = candidate;
+        s = s.substring(0, abbrevMatch.index).trim();
+        if (s.charAt(s.length-1) === ',') s = s.substring(0, s.length-1).trim();
+      }
+      // Unknown 2-letter token: leave state empty, token stays in city
+    }
+  }
+  var city = s.trim();
+  if (city.charAt(city.length-1) === ',') city = city.substring(0, city.length-1).trim();
+  return {city: city, state: state, zip: zip};
+}
+
 function addressMatch(inputAddr, rowAddr) {
   var a = parseAddressComponents(inputAddr);
   var b = parseAddressComponents(rowAddr);
@@ -2880,12 +2952,8 @@ function writeToRegistry(token, folderLink, callback) {
 
 function createRegistryRow(token, rows, folderLink, callback) {
   var addr = v('f-address');
-  var cityStateZip = v('f-citystatezip');
-  var parts = cityStateZip.split(',').map(function(s) { return s.trim(); });
-  var city = parts[0] || '';
-  var stateZip = (parts[1] || '').trim().split(/\s+/);
-  var state = stateZip[0] || '';
-  var zip = stateZip[1] || '';
+  var csz = parseCSZ(v('f-citystatezip'));
+  var billCsz = billingDiff ? parseCSZ(v('f-bill-csz')) : {city:'', state:'', zip:''};
   var year = new Date().getFullYear().toString();
   var jobId = generateJobId(rows);
   var today = new Date().toISOString().split('T')[0];
@@ -2894,14 +2962,23 @@ function createRegistryRow(token, rows, folderLink, callback) {
   newRow[0]  = jobId;
   newRow[1]  = year;
   newRow[4]  = addr;
-  newRow[5]  = city;
-  newRow[6]  = state;
-  newRow[7]  = zip;
+  newRow[5]  = csz.city;
+  newRow[6]  = csz.state;
+  newRow[7]  = csz.zip;
   newRow[8]  = v('f-jobstatus') || 'E';
   newRow[9]  = '';  // J = HOA Name (flat roof — no HOA)
   newRow[10] = v('f-client');
   newRow[11] = formatPhone(v('f-phone'));
   newRow[12] = v('f-email');
+  // === H1 BILLING FIELDS — begin (Phase 1, May 12 2026) ===
+  newRow[14] = billingDiff ? 'No' : 'Yes';                              // O = Bill Same as Property
+  newRow[15] = billingDiff ? v('f-bill-street') : '';                   // P = Billing Street
+  newRow[16] = billingDiff ? billCsz.city : '';                         // Q = Billing City
+  newRow[17] = billingDiff ? billCsz.state : '';                        // R = Billing State
+  newRow[18] = billingDiff ? billCsz.zip : '';                          // S = Billing ZIP
+  newRow[19] = billingDiff ? formatPhone(v('f-bill-phone')) : '';       // T = Billing Phone
+  newRow[20] = billingDiff ? v('f-bill-email') : '';                    // U = Billing Email
+  // === H1 BILLING FIELDS — end ===
   newRow[21] = insClaimVal === 'yes' ? 'Yes' : 'No';
   newRow[22] = insClaimVal === 'yes' ? v('f-claimnum') : '';
   newRow[46] = 'Yes';
@@ -3208,6 +3285,7 @@ function makeDefaultStructure(typeVal, labelVal) {
 
 function buildRegistryUpdates(targetRow, folderLink) {
   var updates = [];
+  var billCsz = billingDiff ? parseCSZ(v('f-bill-csz')) : {city:'', state:'', zip:''};
   function addUpdate(col1based, value) {
     if (value === undefined || value === null || value === '') return;
     updates.push({range: 'Job Registry!' + col1basedToLetter(col1based) + targetRow, values: [[value]]});
@@ -3216,6 +3294,20 @@ function buildRegistryUpdates(targetRow, folderLink) {
   var client = v('f-client'); if (client) addUpdate(11, client);
   var phone = v('f-phone'); if (phone) addUpdate(12, formatPhone(phone));
   var email = v('f-email'); if (email) addUpdate(13, email);
+  // === H1 BILLING FIELDS — begin (Phase 1, May 12 2026) ===
+  // Col 15 (O = Bill Same as Property) — always non-empty 'Yes' or 'No', so addUpdate writes it
+  // unconditionally. writeToRegistry's alwaysWrite set must include 15 so the batchGet-blankness
+  // filter does not drop this column on the UPDATE path.
+  addUpdate(15, billingDiff ? 'No' : 'Yes');
+  if (billingDiff) {
+    addUpdate(16, v('f-bill-street'));                                    // P = Billing Street
+    addUpdate(17, billCsz.city);                                          // Q = Billing City
+    addUpdate(18, billCsz.state);                                         // R = Billing State
+    addUpdate(19, billCsz.zip);                                           // S = Billing ZIP
+    addUpdate(20, formatPhone(v('f-bill-phone')));                        // T = Billing Phone
+    addUpdate(21, v('f-bill-email'));                                     // U = Billing Email
+  }
+  // === H1 BILLING FIELDS — end ===
   addUpdate(22, insClaimVal === 'yes' ? 'Yes' : 'No');
   var claimNum = v('f-claimnum');
   if (insClaimVal === 'yes' && claimNum) addUpdate(23, claimNum);

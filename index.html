@@ -1527,8 +1527,13 @@ function handlePhoto(event,secId,facetIdx){
       ctx.fillText((sec?sec.label:secId)+' ['+(f.label||'F'+facetIdx)+'] - '+slotLabel,12,40);
       ctx.drawImage(img,0,BAR,canvas.width,img.height*ratio);
       var dataURL=canvas.toDataURL('image/jpeg',0.65);
-      var entry={dataURL:dataURL,caption:'',label:slotLabel,sectionLabel:sec?sec.label:secId,uploaded:false};
+      // Phase 2 H1 fix — UUID photoId persists this entry to IDB.
+      // dataURL stays on the in-memory entry for upload pipeline + UI render;
+      // stripDataURLsForSave drops it from the localStorage copy.
+      var photoId=(window.crypto&&crypto.randomUUID)?crypto.randomUUID():('p_'+Date.now()+'_'+Math.random().toString(36).substring(2,10));
+      var entry={photoId:photoId,dataURL:dataURL,caption:'',label:slotLabel,sectionLabel:sec?sec.label:secId,uploaded:false};
       arr.push(entry);
+      savePhotoToDB(photoId,dataURL).catch(function(e){console.warn('savePhotoToDB failed:',e);});
       var newIdx=arr.length-1;
       renderPhotoCard2(secId,facetIdx,newIdx,document.getElementById('pgrid-'+secId+'-f'+facetIdx));
       updatePhotoCount2(secId,facetIdx);updatePhotoStatus();
@@ -1592,6 +1597,9 @@ function markPhotoUploaded2(secId,facetIdx,idx){
 
 function deletePhoto2(secId,facetIdx,idx){
   var f=facetList[facetIdx];if(!f||!f.photos[secId])return;
+  // Phase 2 H1 fix — remove from IDB before splicing in-memory array (capture photoId first).
+  var doomed=f.photos[secId][idx];
+  if(doomed&&doomed.photoId)deletePhotoFromDB(doomed.photoId).catch(function(){});
   f.photos[secId].splice(idx,1);
   var sid=secId+'-f'+facetIdx;
   var grid=document.getElementById('pgrid-'+sid);
@@ -2240,7 +2248,8 @@ var CLIENT_ID = '253782351183-8pgd31f0ttse239isq7d0velvd5gcknb.apps.googleuserco
 var DRIVE_FOLDER_ID = '1OoAIRWoJw0WSaos3ieV-bUX96OR9NA5o';
 var SHEETS_URL = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vTh0tjaBLG5QzcExjVIUqyjBXBEb2hwe10fC82MmkQZvQ0xBCbPdnss9-IRMMalmwaj3o1YtEFiSwlB/pub?gid=0&single=true&output=csv';
 var NOTIFY_EMAIL = 'inspection@kosarekcc.com';
-var SAVE_KEY = 'kccFlatInsp_v1';
+var SAVE_KEY = 'kccFlatInsp_v2';
+var __initComplete = false;  // Phase 2 H2 fix — autoSave gated until checkForRestore/restoreData/dismissRestore resolves.
 var SHEETS_REGISTRY_ID = '1cElx3edOb_3dNeLYy6f-mLiyi6zghsWoCGnPLLWr3Rc';
 
 var PHOTO_SECTIONS = []; // superseded by per-facet FACET_PHOTO_SECTIONS
@@ -2256,59 +2265,94 @@ var systemScopes = {};
 SYS_IDS.forEach(function(sid) { systemChecked[sid] = false; systemScopes[sid] = 'reroof'; });
 
 var photoDB = null;
-var PHOTO_DB_NAME = 'kccFlatPhotoStore_v1';
+var PHOTO_DB_NAME = 'kccFlatPhotoStore_v2';
 var PHOTO_STORE_NAME = 'photos';
 var saveTimer = null;
 var inspectorList = [];
 var accessToken = null;
 var tokenExpiry = 0;
 
-function openPhotoDB(callback) {
-  if (photoDB) { callback(photoDB); return; }
-  var req = indexedDB.open(PHOTO_DB_NAME, 1);
-  req.onupgradeneeded = function(e) {
-    var db = e.target.result;
-    if (!db.objectStoreNames.contains(PHOTO_STORE_NAME)) {
-      db.createObjectStore(PHOTO_STORE_NAME, {keyPath: 'key'});
-    }
-  };
-  req.onsuccess = function(e) { photoDB = e.target.result; callback(photoDB); };
-  req.onerror = function() { console.error('IndexedDB open failed'); callback(null); };
-}
-
-function savePhotoToDB(secId, idx, entry) {
-  openPhotoDB(function(db) {
-    if (!db) return;
-    var tx = db.transaction(PHOTO_STORE_NAME, 'readwrite');
-    var store = tx.objectStore(PHOTO_STORE_NAME);
-    store.put({key: secId+'-'+idx, secId: secId, idx: idx, dataURL: entry.dataURL, caption: entry.caption, label: entry.label, sectionLabel: entry.sectionLabel, uploaded: entry.uploaded});
+// ============================================================
+// IDB photo store — Promise-based shape (Phase 2 H1 fix, May 12 2026)
+// Verified by test/phase2_h1_idb_roundtrip_test.html (10/10 PASS).
+// Photos persist here exclusively; localStorage holds the facetList
+// shape + metadata only (stripped of dataURLs by stripDataURLsForSave).
+// Keypath bumped from 'key' to 'photoId' alongside PHOTO_DB_NAME v1→v2.
+// Photo IDs are opaque UUIDs generated at handlePhoto capture time.
+// ============================================================
+function openPhotoDB() {
+  if (photoDB) return Promise.resolve(photoDB);
+  return new Promise(function(resolve, reject) {
+    var req = indexedDB.open(PHOTO_DB_NAME, 1);
+    req.onupgradeneeded = function(e) {
+      var db = e.target.result;
+      if (!db.objectStoreNames.contains(PHOTO_STORE_NAME)) {
+        db.createObjectStore(PHOTO_STORE_NAME, {keyPath: 'photoId'});
+      }
+    };
+    req.onsuccess = function(e) { photoDB = e.target.result; resolve(photoDB); };
+    req.onerror = function(e) { console.error('IndexedDB open failed'); reject(e.target.error); };
   });
 }
 
-function deletePhotoFromDB(secId, idx) {
-  openPhotoDB(function(db) {
-    if (!db) return;
-    var tx = db.transaction(PHOTO_STORE_NAME, 'readwrite');
-    tx.objectStore(PHOTO_STORE_NAME).delete(secId+'-'+idx);
+function savePhotoToDB(photoId, dataURL) {
+  return openPhotoDB().then(function(db) {
+    return new Promise(function(resolve, reject) {
+      var tx = db.transaction([PHOTO_STORE_NAME], 'readwrite');
+      var store = tx.objectStore(PHOTO_STORE_NAME);
+      var req = store.put({photoId: photoId, dataURL: dataURL});
+      req.onsuccess = function() { resolve(); };
+      req.onerror = function(e) { reject(e.target.error); };
+    });
   });
 }
 
-function clearAllPhotosFromDB(callback) {
-  openPhotoDB(function(db) {
-    if (!db) { if (callback) callback(); return; }
-    var tx = db.transaction(PHOTO_STORE_NAME, 'readwrite');
-    tx.objectStore(PHOTO_STORE_NAME).clear();
-    tx.oncomplete = function() { if (callback) callback(); };
+function loadPhotoFromDB(photoId) {
+  return openPhotoDB().then(function(db) {
+    return new Promise(function(resolve, reject) {
+      var tx = db.transaction([PHOTO_STORE_NAME], 'readonly');
+      var store = tx.objectStore(PHOTO_STORE_NAME);
+      var req = store.get(photoId);
+      req.onsuccess = function(e) { resolve(e.target.result ? e.target.result.dataURL : null); };
+      req.onerror = function(e) { reject(e.target.error); };
+    });
   });
 }
 
-function restorePhotosFromDB(callback) {
-  openPhotoDB(function(db) {
-    if (!db) { callback([]); return; }
-    var tx = db.transaction(PHOTO_STORE_NAME, 'readonly');
-    var req = tx.objectStore(PHOTO_STORE_NAME).getAll();
-    req.onsuccess = function(e) { callback(e.target.result || []); };
-    req.onerror = function() { callback([]); };
+function deletePhotoFromDB(photoId) {
+  return openPhotoDB().then(function(db) {
+    return new Promise(function(resolve, reject) {
+      var tx = db.transaction([PHOTO_STORE_NAME], 'readwrite');
+      var store = tx.objectStore(PHOTO_STORE_NAME);
+      var req = store.delete(photoId);
+      req.onsuccess = function() { resolve(); };
+      req.onerror = function(e) { reject(e.target.error); };
+    });
+  });
+}
+
+function clearAllPhotosFromDB() {
+  return openPhotoDB().then(function(db) {
+    return new Promise(function(resolve, reject) {
+      var tx = db.transaction([PHOTO_STORE_NAME], 'readwrite');
+      var store = tx.objectStore(PHOTO_STORE_NAME);
+      var req = store.clear();
+      req.onsuccess = function() { resolve(); };
+      req.onerror = function(e) { reject(e.target.error); };
+    });
+  });
+}
+
+function restorePhotosFromDB() {
+  // Returns Promise<Array<{photoId, dataURL}>>
+  return openPhotoDB().then(function(db) {
+    return new Promise(function(resolve, reject) {
+      var tx = db.transaction([PHOTO_STORE_NAME], 'readonly');
+      var store = tx.objectStore(PHOTO_STORE_NAME);
+      var req = store.getAll();
+      req.onsuccess = function(e) { resolve(e.target.result || []); };
+      req.onerror = function(e) { reject(e.target.error); };
+    });
   });
 }
 
@@ -3206,7 +3250,9 @@ function updateCaption(secId,idx){
   var el=document.getElementById('pcap-'+secId+'-'+idx);
   if(el){
     photoStore[secId][idx].caption=el.value;
-    savePhotoToDB(secId,idx,photoStore[secId][idx]);
+    // Phase 2 H1 fix — dead callsite removed (this function operates on the
+    // vestigial top-level photoStore which is always empty; live captions are
+    // handled inline by renderPhotoCard2's caption oninput at L1555).
   }
 }
 
@@ -3232,7 +3278,9 @@ function downloadSectionPhotos(secId){
 
 
 function deletePhoto(secId,idx){
-  deletePhotoFromDB(secId,idx);
+  // Phase 2 H1 fix — dead deletePhotoFromDB callsite removed (old 2-arg signature
+  // incompatible with new Promise-based deletePhotoFromDB(photoId); live deletes
+  // routed through deletePhoto2 at L1593 which captures entry.photoId correctly).
   photoStore[secId].splice(idx,1);
   var grid=document.getElementById('pgrid-'+secId);
   grid.innerHTML='';
@@ -3251,21 +3299,39 @@ function updatePhotoCount(secId){
 
 
 
-function dismissRestore(){document.getElementById('restoreBanner').classList.remove('show');localStorage.removeItem(SAVE_KEY);clearAllPhotosFromDB();}
+function dismissRestore(){
+  document.getElementById('restoreBanner').classList.remove('show');
+  localStorage.removeItem(SAVE_KEY);
+  clearAllPhotosFromDB().catch(function(){});
+  __initComplete = true;  // Phase 2 H2 fix — user chose fresh inspection; enable autoSave.
+}
 
 function checkForRestore(){
-  restorePhotosFromDB(function(entries){
-    if(entries&&entries.length>0){
-      document.getElementById('restoreBanner').classList.add('show');
-    }
-  });
+  // Phase 2 H2 fix — gate __initComplete on restore resolution.
+  // Synchronous localStorage check first; async IDB check second.
+  // If NEITHER source has data → no banner, set __initComplete = true so autoSave fires for a fresh inspection.
+  // If EITHER source has data → banner shown, __initComplete stays false until restoreData or dismissRestore runs.
+  var bannerShown = false;
   try{
-    var raw=localStorage.getItem(SAVE_KEY); if(!raw)return;
-    var data=JSON.parse(raw);
-    var hasData=false;
-    Object.keys(data).forEach(function(k){if(k.charAt(0)!=='_'&&data[k]&&data[k]!=='0'&&data[k]!=='unknown'&&data[k]!=='1'&&data[k]!==NOTIFY_EMAIL)hasData=true;});
-    if(hasData)document.getElementById('restoreBanner').classList.add('show');
+    var raw=localStorage.getItem(SAVE_KEY);
+    if (raw) {
+      var data=JSON.parse(raw);
+      var hasData=false;
+      Object.keys(data).forEach(function(k){if(k.charAt(0)!=='_'&&data[k]&&data[k]!=='0'&&data[k]!=='unknown'&&data[k]!=='1'&&data[k]!==NOTIFY_EMAIL)hasData=true;});
+      if (hasData) { document.getElementById('restoreBanner').classList.add('show'); bannerShown = true; }
+    }
   }catch(e){}
+  restorePhotosFromDB().then(function(entries){
+    if (entries && entries.length > 0) {
+      document.getElementById('restoreBanner').classList.add('show');
+      // Banner now shown; __initComplete stays false until user taps Restore or Dismiss.
+    } else if (!bannerShown) {
+      __initComplete = true;  // No restorable data from either source — enable autoSave.
+    }
+  }).catch(function(){
+    // IDB error: if LS already raised the banner, leave init gated; else enable for fresh use.
+    if (!bannerShown) __initComplete = true;
+  });
 }
 
 var STRUCT_SCOPE_IDS = ['f-reqtype','f-jobstatus','f-claimnum','f-notes'];
@@ -3504,7 +3570,23 @@ function jobSlug(){
   return ('FlatRoof-'+(v('f-address')||'Job')+'-'+(v('f-date')||new Date().toISOString().split('T')[0])).replace(/[^a-zA-Z0-9]/g,'-').replace(/-+/g,'-').substring(0,60);
 }
 
+// ============================================================
+// stripDataURLsForSave — Phase 2 H1 fix (May 12 2026)
+// Verified by test/phase2_h1_stripDataURLs_test.html (12/12 PASS).
+// Verbatim port of roof-inspector commit e945be0 (April 29 2026).
+// Removes every 'dataURL' key from a cloned object tree before
+// JSON.stringify writes it to localStorage. Photos persist in IDB
+// (canonical); localStorage holds shape + metadata only.
+// ============================================================
+function stripDataURLsForSave(obj) {
+  return JSON.parse(JSON.stringify(obj, function(key, value) {
+    if (key === 'dataURL') return undefined;
+    return value;
+  }));
+}
+
 function autoSave(){
+  if (!__initComplete) return;  // Phase 2 H2 fix — don't clobber a restorable save before user taps Restore/Dismiss.
   updateProgress();
   clearTimeout(saveTimer);
   var bar=document.getElementById('saveBar'); bar.textContent='saving...'; bar.className='autosave-bar';
@@ -3515,8 +3597,8 @@ function autoSave(){
       saveCurrentStructToDB();
       data._billingDiff=billingDiff;
       data._insClaimVal=insClaimVal;
-      data._structures=structureList;
-      data._facetList=JSON.parse(JSON.stringify(facetList));
+      data._structures=stripDataURLsForSave(structureList);
+      data._facetList=stripDataURLsForSave(facetList);
       data._activeFacetIdx=activeFacetIdx;
       data._evVal=evVal;
       data._activeStructIdx=activeStructIdx;
@@ -3536,30 +3618,50 @@ function autoSave(){
 
 function restoreData(){
   document.getElementById('restoreBanner').classList.remove('show');
-  try{
-    var data=JSON.parse(localStorage.getItem(SAVE_KEY)||'{}');
-    Object.keys(data).forEach(function(key){if(key.charAt(0)==='_')return;var el=document.getElementById(key);if(el)el.value=data[key];});
-    if(data._billingDiff!==undefined)setBilling(data._billingDiff?'no':'yes');
-    if(data._insClaimVal!==undefined)setInsClaim(data._insClaimVal);
-    if(data._facetList&&data._facetList.length){
-      facetList=data._facetList; activeFacetIdx=data._activeFacetIdx||0; activePhotoFacetIdx=0;
-      if(data._evVal)setEV(data._evVal);
-      renderFacetScope(); buildPhotoSections(); updatePhotoStatus();
-    }
-    if(data._structures&&data._structures.length){
-      structureList=data._structures; activeStructIdx=data._activeStructIdx||0;
-      loadStructFromDB(activeStructIdx); renderStructBar();
-    } else if(data._systemChecked){
-      SYS_IDS.forEach(function(sid){
-        if(data._systemChecked[sid]){systemChecked[sid]=false;toggleSystem(sid);}
-        if(data._systemScopes&&data._systemScopes[sid])setSysScope(sid,data._systemScopes[sid]);
-        if(data._systemNotes&&data._systemNotes[sid]){var el=document.getElementById('sysnotes-'+sid);if(el){el.value=data._systemNotes[sid];if(data._systemNotes[sid])el.className='system-notes-input show';}}
-      });
-    }
-    if(data._inspIdx){setTimeout(function(){document.getElementById('f-inspector').value=data._inspIdx;onInspectorChange();},1200);}
-  }catch(e){}
-  // Photos are stored in facetList — no separate IndexedDB restore needed
-  updatePhotoStatus();
+  // Phase 2 H1 fix — Option C hydration: single getAll() → {photoId: dataURL} map →
+  // synchronous re-assignment as facetList is restored. dataURLs live in IDB; the
+  // localStorage save only carries metadata + photoId references.
+  restorePhotosFromDB().then(function(entries){
+    return entries || [];
+  }).catch(function(e){
+    console.warn('restoreData: IDB hydration failed; proceeding without photos', e);
+    return [];
+  }).then(function(entries){
+    var photoMap = {};
+    entries.forEach(function(e){ if (e && e.photoId) photoMap[e.photoId] = e.dataURL; });
+    try{
+      var data=JSON.parse(localStorage.getItem(SAVE_KEY)||'{}');
+      Object.keys(data).forEach(function(key){if(key.charAt(0)==='_')return;var el=document.getElementById(key);if(el)el.value=data[key];});
+      if(data._billingDiff!==undefined)setBilling(data._billingDiff?'no':'yes');
+      if(data._insClaimVal!==undefined)setInsClaim(data._insClaimVal);
+      if(data._facetList&&data._facetList.length){
+        facetList=data._facetList; activeFacetIdx=data._activeFacetIdx||0; activePhotoFacetIdx=0;
+        // Hydrate photo dataURLs from IDB map (Phase 2 H1 fix).
+        facetList.forEach(function(f){
+          Object.keys(f.photos||{}).forEach(function(secId){
+            (f.photos[secId]||[]).forEach(function(entry){
+              if (entry.photoId && photoMap[entry.photoId]) entry.dataURL = photoMap[entry.photoId];
+            });
+          });
+        });
+        if(data._evVal)setEV(data._evVal);
+        renderFacetScope(); buildPhotoSections(); updatePhotoStatus();
+      }
+      if(data._structures&&data._structures.length){
+        structureList=data._structures; activeStructIdx=data._activeStructIdx||0;
+        loadStructFromDB(activeStructIdx); renderStructBar();
+      } else if(data._systemChecked){
+        SYS_IDS.forEach(function(sid){
+          if(data._systemChecked[sid]){systemChecked[sid]=false;toggleSystem(sid);}
+          if(data._systemScopes&&data._systemScopes[sid])setSysScope(sid,data._systemScopes[sid]);
+          if(data._systemNotes&&data._systemNotes[sid]){var el=document.getElementById('sysnotes-'+sid);if(el){el.value=data._systemNotes[sid];if(data._systemNotes[sid])el.className='system-notes-input show';}}
+        });
+      }
+      if(data._inspIdx){setTimeout(function(){document.getElementById('f-inspector').value=data._inspIdx;onInspectorChange();},1200);}
+    }catch(e){}
+    updatePhotoStatus();
+    __initComplete = true;  // Phase 2 H2 fix — restore complete; enable autoSave.
+  });
 }
 
 var TRACK_IDS=['f-address','f-citystatezip','f-client','f-reqtype'];
@@ -3620,7 +3722,7 @@ checkForRestore();
 checkAuth();
 updateProgress();
 updatePhotoStatus();
-openPhotoDB(function(){});
+openPhotoDB().catch(function(){});
 loadGoogleGSI();
 window.addEventListener('beforeunload', function(e) {
   var unsaved = 0;

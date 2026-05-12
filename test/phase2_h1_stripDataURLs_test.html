@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Phase 2 H1 — stripDataURLsForSave Baseline Test</title>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 16px; background: #f5f6f8; color: #111; }
+  h1 { margin: 0 0 8px; font-size: 18px; }
+  .summary { padding: 14px 18px; border-radius: 6px; margin: 8px 0 18px; font-size: 22px; font-weight: bold; }
+  .summary.ok  { background: #d8f3dc; color: #1b4332; border: 2px solid #2d6a4f; }
+  .summary.bad { background: #ffd6d6; color: #6a040f; border: 2px solid #9d0208; }
+  table { border-collapse: collapse; width: 100%; font-size: 12px; background: #fff; margin-bottom: 6px; }
+  th, td { padding: 6px 8px; border: 1px solid #ddd; text-align: left; vertical-align: top; }
+  th { background: #eef; font-size: 11px; text-transform: uppercase; }
+  tr.pass td { background: #f0faf0; }
+  tr.fail td { background: #ffecec; }
+  .pf { font-weight: bold; }
+  .pf.pass { color: #1b4332; }
+  .pf.fail { color: #9d0208; }
+  .res { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px; word-break: break-word; }
+  .truncate { max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: inline-block; vertical-align: top; }
+  .notes { margin-top: 24px; padding: 14px; background: #fff; border: 1px solid #ddd; border-radius: 6px; font-size: 12px; line-height: 1.55; }
+  .notes code { background: #eef; padding: 1px 4px; border-radius: 3px; font-size: 11px; }
+</style>
+</head>
+<body>
+<h1>Phase 2 H1 — stripDataURLsForSave Baseline Test</h1>
+<div>Project: flat-roof-inspector | Bug 2 fix: H1 (localStorage quota exhaustion from inlined photo dataURLs) | Rule 27 baseline</div>
+<div id="summary" class="summary">Running...</div>
+<table>
+  <thead>
+    <tr><th>#</th><th>Test</th><th>Before size</th><th>After size</th><th>Expected (truncated)</th><th>Actual (truncated)</th><th>P/F</th></tr>
+  </thead>
+  <tbody id="results"></tbody>
+</table>
+<div class="notes" id="notes"></div>
+
+<script>
+// =====================================================================
+// stripDataURLsForSave — verbatim port of roof-inspector commit e945be0 (L5092–L5097)
+// =====================================================================
+function stripDataURLsForSave(obj) {
+  return JSON.parse(JSON.stringify(obj, function(key, value) {
+    if (key === 'dataURL') return undefined;
+    return value;
+  }));
+}
+
+// =====================================================================
+// Test harness
+// =====================================================================
+var tests = [];
+function expect(label, before, expectedAfter, opts) {
+  var actual = stripDataURLsForSave(before);
+  var actualStr = JSON.stringify(actual);
+  var expectedStr = JSON.stringify(expectedAfter);
+  var pass = actualStr === expectedStr;
+  tests.push({
+    label: label,
+    before: before,
+    beforeSize: JSON.stringify(before).length,
+    expectedAfter: expectedAfter,
+    actual: actual,
+    actualStr: actualStr,
+    expectedStr: expectedStr,
+    afterSize: actualStr.length,
+    pass: pass,
+    note: opts && opts.note
+  });
+}
+
+function expectCustom(label, before, predicateFn, predicateLabel) {
+  // For Case 12 size assertion — uses a predicate function rather than deep equality.
+  var actual = stripDataURLsForSave(before);
+  var actualStr = JSON.stringify(actual);
+  var pass = predicateFn(actual, actualStr);
+  tests.push({
+    label: label,
+    before: before,
+    beforeSize: JSON.stringify(before).length,
+    expectedAfter: predicateLabel,
+    actual: actual,
+    actualStr: actualStr,
+    expectedStr: predicateLabel,
+    afterSize: actualStr.length,
+    pass: pass,
+    note: predicateLabel
+  });
+}
+
+// ---------------------------------------------------------------------
+// Case 1 — Empty object
+// ---------------------------------------------------------------------
+expect('Empty object', {}, {});
+
+// ---------------------------------------------------------------------
+// Case 2 — Object with no dataURL keys
+// ---------------------------------------------------------------------
+expect('Object with no dataURL keys',
+  {city:'Akron', state:'OH'},
+  {city:'Akron', state:'OH'}
+);
+
+// ---------------------------------------------------------------------
+// Case 3 — dataURL at top level
+// ---------------------------------------------------------------------
+expect('dataURL at top level',
+  {dataURL:'data:image/jpeg;base64,xxxxx', caption:'Test'},
+  {caption:'Test'}
+);
+
+// ---------------------------------------------------------------------
+// Case 4 — dataURL in nested object
+// ---------------------------------------------------------------------
+expect('dataURL in nested object',
+  {photo:{dataURL:'data:image/jpeg;base64,xxx', caption:'Test'}},
+  {photo:{caption:'Test'}}
+);
+
+// ---------------------------------------------------------------------
+// Case 5 — Array of objects with dataURL
+// ---------------------------------------------------------------------
+expect('Array of objects with dataURL',
+  [{dataURL:'aaa', caption:'A'}, {dataURL:'bbb', caption:'B'}],
+  [{caption:'A'}, {caption:'B'}]
+);
+
+// ---------------------------------------------------------------------
+// Case 6 — facetList shape (representative of production save payload)
+// ---------------------------------------------------------------------
+expect('facetList shape with one photo',
+  {facetList:[{name:'Roof 1', photos:{section1:[{dataURL:'big base64 string here for testing', caption:'overview', label:'L1'}]}}]},
+  {facetList:[{name:'Roof 1', photos:{section1:[{caption:'overview', label:'L1'}]}}]}
+);
+
+// ---------------------------------------------------------------------
+// Case 7 — Large dataURL (simulate real photo size, 100,000 chars)
+// ---------------------------------------------------------------------
+(function(){
+  var bigDataURL = 'data:image/jpeg;base64,' + 'A'.repeat(100000);
+  var bigInput = {dataURL: bigDataURL, caption: 'big photo'};
+  expect('Large dataURL (100KB)', bigInput, {caption:'big photo'});
+})();
+
+// ---------------------------------------------------------------------
+// Case 8 — Multiple photos in one section
+// ---------------------------------------------------------------------
+expect('Multiple photos in one section',
+  {photos:{s1:[{dataURL:'a',caption:'1'},{dataURL:'b',caption:'2'},{dataURL:'c',caption:'3'}]}},
+  {photos:{s1:[{caption:'1'},{caption:'2'},{caption:'3'}]}}
+);
+
+// ---------------------------------------------------------------------
+// Case 9 — Mixed keys; only EXACT 'dataURL' is stripped
+// ---------------------------------------------------------------------
+expect('Only exact "dataURL" key stripped',
+  {dataURL:'x', uploaded:true, caption:'y', otherUrlKey:'z'},
+  {uploaded:true, caption:'y', otherUrlKey:'z'},
+  {note: 'otherUrlKey not affected — only exact match on "dataURL" key name'}
+);
+
+// ---------------------------------------------------------------------
+// Case 10 — null/undefined value at dataURL key still strips
+// ---------------------------------------------------------------------
+expect('null dataURL still stripped',
+  {dataURL:null, caption:'x'},
+  {caption:'x'}
+);
+
+// ---------------------------------------------------------------------
+// Case 11 — Top-level array (facetList directly)
+// ---------------------------------------------------------------------
+expect('Top-level array (facetList directly)',
+  [{photos:{s1:[{dataURL:'a'}]}}],
+  [{photos:{s1:[{}]}}]
+);
+
+// ---------------------------------------------------------------------
+// Case 12 — Size assertion: 30 photos × ~80KB dataURL → stripped < 5,000 chars
+// ---------------------------------------------------------------------
+(function(){
+  var fakePhotoDataURL = 'data:image/jpeg;base64,' + 'X'.repeat(80000); // 80,022 chars ≈ 80 KB
+  var fakeFacetList = [{
+    name: 'Facet A',
+    label: 'A',
+    edges: [],
+    curbs: [],
+    crickets: [],
+    lowspots: [],
+    spec: {slopeOk:'yes', ballast:'no', storyHeight:1, roofAccess:'ladder', coreSample:'yes', layer1:'TPO', layer2:'', layer3:'', deckingType:'Wood', fieldNotes:''},
+    photos: {}
+  }];
+  // 30 photos distributed across 6 sections (5 per section — realistic flat-roof inspection density)
+  ['groundview','coreSample','edges','penetrations','curbs','crickets'].forEach(function(sec){
+    fakeFacetList[0].photos[sec] = [];
+    for (var i = 0; i < 5; i++) {
+      fakeFacetList[0].photos[sec].push({
+        dataURL: fakePhotoDataURL,
+        caption: 'Photo ' + i,
+        label: sec + '-' + (i+1),
+        sectionLabel: sec,
+        uploaded: false
+      });
+    }
+  });
+
+  // Sanity: total photos = 6 * 5 = 30
+  var totalPhotos = 0;
+  Object.keys(fakeFacetList[0].photos).forEach(function(k){ totalPhotos += fakeFacetList[0].photos[k].length; });
+
+  var beforeSize = JSON.stringify(fakeFacetList).length;
+  expectCustom(
+    '30 photos × 80KB — stripped < 5,000 chars (real-inspection payload sanity)',
+    fakeFacetList,
+    function(actual, actualStr) {
+      // Must be under 5,000 chars AND must still contain all 30 photo entries (metadata-only)
+      var preserves30 = 0;
+      actual[0].photos && Object.keys(actual[0].photos).forEach(function(k){ preserves30 += actual[0].photos[k].length; });
+      var noDataURLsLeft = actualStr.indexOf('dataURL') === -1;
+      return actualStr.length < 5000 && preserves30 === 30 && noDataURLsLeft;
+    },
+    'JSON.stringify length < 5,000 AND 30 photo entries preserved AND no "dataURL" key remaining'
+  );
+
+  // Stash on window for the notes block to show stats
+  window.__case12Stats = {
+    inputPhotos: totalPhotos,
+    beforeSize: beforeSize,
+    beforeSizeMB: (beforeSize / (1024*1024)).toFixed(2),
+    afterSize: JSON.stringify(stripDataURLsForSave(fakeFacetList)).length
+  };
+})();
+
+// =====================================================================
+// RENDER
+// =====================================================================
+function esc(x){
+  if (x === null) return '<em>null</em>';
+  if (x === undefined) return '<em>undefined</em>';
+  if (typeof x === 'object') {
+    var s = JSON.stringify(x);
+    if (s.length > 200) s = s.substring(0, 200) + '... [' + s.length + ' chars]';
+    return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  }
+  var str = String(x);
+  if (str.length > 200) str = str.substring(0, 200) + '... [' + str.length + ' chars]';
+  return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+function fmtSize(n) {
+  if (n < 1024) return n + ' B';
+  if (n < 1024*1024) return (n/1024).toFixed(1) + ' KB';
+  return (n/(1024*1024)).toFixed(2) + ' MB';
+}
+
+var pass = tests.filter(function(t){return t.pass;}).length;
+var total = tests.length;
+var summaryEl = document.getElementById('summary');
+if (pass === total) {
+  summaryEl.className = 'summary ok';
+  summaryEl.textContent = '✓ ' + pass + ' / ' + total + ' PASS';
+} else {
+  summaryEl.className = 'summary bad';
+  summaryEl.textContent = '✗ ' + (total - pass) + ' FAILED of ' + total + ' total — ' + pass + ' passed';
+}
+
+var tbody = document.getElementById('results');
+tests.forEach(function(t, i){
+  var tr = document.createElement('tr');
+  tr.className = t.pass ? 'pass' : 'fail';
+  tr.innerHTML =
+    '<td>' + (i+1) + '</td>'
+    + '<td>' + esc(t.label) + (t.note ? '<br><small><em>' + esc(t.note) + '</em></small>' : '') + '</td>'
+    + '<td class="res">' + fmtSize(t.beforeSize) + '</td>'
+    + '<td class="res">' + fmtSize(t.afterSize) + '</td>'
+    + '<td class="res">' + esc(t.expectedAfter) + '</td>'
+    + '<td class="res">' + esc(t.actual) + '</td>'
+    + '<td class="pf ' + (t.pass ? 'pass' : 'fail') + '">' + (t.pass ? 'PASS' : 'FAIL') + '</td>';
+  tbody.appendChild(tr);
+});
+
+// Notes block
+var notes = document.getElementById('notes');
+var c12 = window.__case12Stats || {};
+notes.innerHTML =
+  '<strong>What this test validates:</strong> the <code>stripDataURLsForSave</code> helper that will be ' +
+  'inserted into <code>autoSave</code> in Phase 2 Step 3. The helper removes every <code>dataURL</code> key from a ' +
+  'cloned object tree before <code>JSON.stringify</code> writes it to <code>localStorage</code>. This is the ' +
+  'verbatim port of the roof-inspector commit e945be0 architectural fix (April 29 2026).<br><br>' +
+  '<strong>Case 12 real-payload sanity:</strong> built a synthetic 30-photo single-facet inspection ' +
+  '(6 sections × 5 photos × ~80 KB dataURL each).<br>' +
+  '&nbsp;&nbsp;Input size:  <code>' + fmtSize(c12.beforeSize || 0) + '</code> (the value autoSave currently tries to setItem — would fail iPhone Safari 5MB quota)<br>' +
+  '&nbsp;&nbsp;Stripped size: <code>' + fmtSize(c12.afterSize || 0) + '</code> (the value autoSave will setItem after Phase 2 H1 fix)<br>' +
+  '&nbsp;&nbsp;Reduction:   <code>' + ((c12.beforeSize && c12.afterSize) ? Math.round((1 - c12.afterSize/c12.beforeSize) * 1000) / 10 + '%' : '?') + '</code><br><br>' +
+  '<strong>Test file:</strong> <code>C:\\KCC_Local\\flat-roof-inspector\\test\\phase2_h1_stripDataURLs_test.html</code><br>' +
+  '<strong>How to run:</strong> open Windows Explorer, navigate to that folder, double-click the file. ' +
+  'Browser opens, runs all tests, banner appears at top.<br>' +
+  '<strong>Expected:</strong> 12/12 PASS green banner.';
+
+console.log('=== Phase 2 H1 stripDataURLsForSave Baseline Test ===');
+console.log('Result: ' + pass + ' / ' + total + ' PASS');
+if (pass !== total) {
+  tests.filter(function(t){return !t.pass;}).forEach(function(t){
+    console.log('  FAIL: ' + t.label);
+    console.log('    expected: ' + t.expectedStr);
+    console.log('    actual:   ' + t.actualStr);
+  });
+}
+console.log('Case 12 stats:', c12);
+</script>
+</body>
+</html>

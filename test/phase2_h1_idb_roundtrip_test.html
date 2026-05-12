@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Phase 2 H1 — IDB Photo Roundtrip Baseline Test</title>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 16px; background: #f5f6f8; color: #111; }
+  h1 { margin: 0 0 8px; font-size: 18px; }
+  #banner { padding: 14px 18px; border-radius: 6px; margin: 8px 0 18px; font-size: 22px; font-weight: bold; text-align: center; color: white; background: #888; }
+  table { border-collapse: collapse; width: 100%; font-size: 12px; background: #fff; margin-bottom: 6px; }
+  th, td { padding: 6px 8px; border: 1px solid #ddd; text-align: left; vertical-align: top; }
+  th { background: #eef; font-size: 11px; text-transform: uppercase; }
+  .res { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px; word-break: break-word; }
+  .notes { margin-top: 24px; padding: 14px; background: #fff; border: 1px solid #ddd; border-radius: 6px; font-size: 12px; line-height: 1.55; }
+  .notes code { background: #eef; padding: 1px 4px; border-radius: 3px; font-size: 11px; }
+</style>
+</head>
+<body>
+<h1>Phase 2 H1 — IDB Photo Roundtrip Baseline Test</h1>
+<div>Project: flat-roof-inspector | Bug 2 fix: H1 part B (photos persist via IndexedDB, not localStorage) | Rule 27 baseline</div>
+<h2 id="banner">Running...</h2>
+<table>
+  <thead><tr><th>Test</th><th>Result</th><th>Detail</th></tr></thead>
+  <tbody id="results"></tbody>
+</table>
+<div class="notes" id="notes"></div>
+
+<script>
+// =====================================================================
+// Constants — _TEST suffix keeps this isolated from the real production DB
+// (kccFlatPhotoStore_v2 once the Step 3 splice lands; v1 today). This test
+// will not pollute the live IDB store.
+// =====================================================================
+var PHOTO_DB_NAME_TEST = 'kccFlatPhotoStore_v2_TEST';
+var DB_VERSION = 1;
+var STORE_NAME = 'photos';
+
+// =====================================================================
+// IDB helpers — verbatim shape that will be spliced into production
+// at Phase 2 Step 3, adapted to flat-roof's photo persistence needs.
+// Pattern matches roof-inspector commit e945be0 (April 29 2026):
+// photos live in IDB exclusively; localStorage holds metadata only.
+// =====================================================================
+function openPhotoDB() {
+  return new Promise(function(resolve, reject) {
+    var req = indexedDB.open(PHOTO_DB_NAME_TEST, DB_VERSION);
+    req.onupgradeneeded = function(e) {
+      var db = e.target.result;
+      if (!db.objectStoreNames.contains(STORE_NAME)) {
+        db.createObjectStore(STORE_NAME, {keyPath: 'id'});
+      }
+    };
+    req.onsuccess = function(e) { resolve(e.target.result); };
+    req.onerror = function(e) { reject(e.target.error); };
+  });
+}
+
+function savePhotoToDB(photoId, dataURL) {
+  return openPhotoDB().then(function(db) {
+    return new Promise(function(resolve, reject) {
+      var tx = db.transaction([STORE_NAME], 'readwrite');
+      var store = tx.objectStore(STORE_NAME);
+      var req = store.put({id: photoId, dataURL: dataURL});
+      req.onsuccess = function() { resolve(); };
+      req.onerror = function(e) { reject(e.target.error); };
+    });
+  });
+}
+
+function loadPhotoFromDB(photoId) {
+  return openPhotoDB().then(function(db) {
+    return new Promise(function(resolve, reject) {
+      var tx = db.transaction([STORE_NAME], 'readonly');
+      var store = tx.objectStore(STORE_NAME);
+      var req = store.get(photoId);
+      req.onsuccess = function(e) { resolve(e.target.result ? e.target.result.dataURL : null); };
+      req.onerror = function(e) { reject(e.target.error); };
+    });
+  });
+}
+
+function listPhotoIds() {
+  return openPhotoDB().then(function(db) {
+    return new Promise(function(resolve, reject) {
+      var tx = db.transaction([STORE_NAME], 'readonly');
+      var store = tx.objectStore(STORE_NAME);
+      var req = store.getAllKeys();
+      req.onsuccess = function(e) { resolve(e.target.result); };
+      req.onerror = function(e) { reject(e.target.error); };
+    });
+  });
+}
+
+function clearTestDB() {
+  return openPhotoDB().then(function(db) {
+    return new Promise(function(resolve, reject) {
+      var tx = db.transaction([STORE_NAME], 'readwrite');
+      var store = tx.objectStore(STORE_NAME);
+      var req = store.clear();
+      req.onsuccess = function() { resolve(); };
+      req.onerror = function(e) { reject(e.target.error); };
+    });
+  });
+}
+
+// =====================================================================
+// Async test runner
+// =====================================================================
+async function runTests() {
+  var results = [];
+  function record(label, pass, detail) {
+    results.push({label: label, pass: pass, detail: detail});
+  }
+
+  try {
+    // Clean start
+    await clearTestDB();
+
+    // Test 1: empty DB
+    var ids = await listPhotoIds();
+    record('1. Empty DB has 0 photos', ids.length === 0, 'count=' + ids.length);
+
+    // Test 2: write one photo
+    await savePhotoToDB('p1', 'data:image/jpeg;base64,AAAA');
+    var v = await loadPhotoFromDB('p1');
+    record('2. Single photo roundtrip', v === 'data:image/jpeg;base64,AAAA', 'got=' + v);
+
+    // Test 3: write 5 photos
+    for (var i = 0; i < 5; i++) {
+      await savePhotoToDB('p' + (i + 10), 'data:image/jpeg;base64,DATA' + i);
+    }
+    var allIds = await listPhotoIds();
+    record('3. Five photos written + original p1 = 6 total', allIds.length === 6, 'count=' + allIds.length);
+
+    // Test 4: load specific photo
+    var p13 = await loadPhotoFromDB('p13');
+    record('4. Specific load returns correct dataURL', p13 === 'data:image/jpeg;base64,DATA3', 'got=' + p13);
+
+    // Test 5: missing photo returns null
+    var missing = await loadPhotoFromDB('does-not-exist');
+    record('5. Missing photo returns null', missing === null, 'got=' + missing);
+
+    // Test 6: overwrite same key
+    await savePhotoToDB('p1', 'data:image/jpeg;base64,REPLACED');
+    var p1again = await loadPhotoFromDB('p1');
+    record('6. Overwrite same key works', p1again === 'data:image/jpeg;base64,REPLACED', 'got=' + p1again);
+
+    // Test 7: large dataURL (simulate real ~100 KB photo)
+    var bigData = 'data:image/jpeg;base64,' + 'A'.repeat(100000);
+    await savePhotoToDB('big1', bigData);
+    var bigBack = await loadPhotoFromDB('big1');
+    record('7. Large dataURL roundtrip (100KB)', bigBack === bigData, 'length=' + (bigBack ? bigBack.length : 'null'));
+
+    // Test 8: 30 photos roundtrip (simulate realistic inspection)
+    await clearTestDB();
+    for (var j = 0; j < 30; j++) {
+      await savePhotoToDB('full' + j, 'data:image/jpeg;base64,' + 'X'.repeat(80000));
+    }
+    var fullIds = await listPhotoIds();
+    record('8. 30 photos written successfully', fullIds.length === 30, 'count=' + fullIds.length);
+
+    // Test 9: roundtrip random sample from 30
+    var p20 = await loadPhotoFromDB('full20');
+    var expected = 'data:image/jpeg;base64,' + 'X'.repeat(80000);
+    var lengthMatch = p20 ? (p20.length === expected.length) : false;
+    record('9. Random photo from large set roundtrips', p20 === expected, 'length match=' + lengthMatch + ', got length=' + (p20 ? p20.length : 'null'));
+
+    // Test 10: clear works
+    await clearTestDB();
+    var afterClear = await listPhotoIds();
+    record('10. clearTestDB empties store', afterClear.length === 0, 'count=' + afterClear.length);
+
+  } catch (err) {
+    record('FATAL ERROR', false, String(err && (err.message || err)));
+  }
+
+  return results;
+}
+
+// =====================================================================
+// Run + render
+// =====================================================================
+runTests().then(function(results) {
+  var pass = results.filter(function(r) { return r.pass; }).length;
+  var total = results.length;
+
+  var banner = document.getElementById('banner');
+  banner.textContent = (pass === total ? '✓ ' : '✗ ') + pass + ' / ' + total + ' PASS';
+  banner.style.background = (pass === total) ? '#2d6a4f' : '#9d0208';
+
+  var tbody = document.getElementById('results');
+  results.forEach(function(r) {
+    var row = document.createElement('tr');
+    row.style.background = r.pass ? '#e8f5e9' : '#ffebee';
+    row.innerHTML =
+      '<td>' + r.label + '</td>'
+      + '<td><strong style="color:' + (r.pass ? '#1b4332' : '#9d0208') + '">' + (r.pass ? 'PASS' : 'FAIL') + '</strong></td>'
+      + '<td class="res">' + (r.detail || '').toString().replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;') + '</td>';
+    tbody.appendChild(row);
+  });
+
+  // Notes block
+  var notes = document.getElementById('notes');
+  notes.innerHTML =
+    '<strong>What this test validates:</strong> the IndexedDB read/write helpers that Phase 2 Step 3 will splice into ' +
+    'production index.html. Once the splice lands, photos persist via <code>savePhotoToDB</code> on capture and ' +
+    'hydrate via <code>loadPhotoFromDB</code> on restore. localStorage holds only the facetList metadata ' +
+    '(stripped of dataURLs) — keeping the localStorage payload well under iPhone Safari\'s ~5MB quota.<br><br>' +
+    '<strong>Why use a separate _TEST DB:</strong> the constant <code>PHOTO_DB_NAME_TEST = ' + PHOTO_DB_NAME_TEST + '</code> ' +
+    'isolates this test\'s IndexedDB store from production. Even if this test is opened from the same ' +
+    'browser profile that has the live app open, no production data is touched.<br><br>' +
+    '<strong>Test file:</strong> <code>C:\\KCC_Local\\flat-roof-inspector\\test\\phase2_h1_idb_roundtrip_test.html</code><br>' +
+    '<strong>How to run:</strong> open Windows Explorer, navigate to that folder, double-click the file. ' +
+    'Browser auto-runs. Banner appears at top.<br>' +
+    '<strong>Expected:</strong> <strong>10 / 10 PASS</strong> green banner.<br>' +
+    '<strong>If FATAL ERROR appears:</strong> IndexedDB is not available in this environment ' +
+    '(private/incognito browsing, storage-disabled flag, or a browser policy). Open in a normal browser window.';
+
+  // Console summary
+  console.log('=== Phase 2 H1 IDB Roundtrip Baseline Test ===');
+  console.log('Result: ' + pass + ' / ' + total + ' PASS');
+  if (pass !== total) {
+    results.filter(function(r) { return !r.pass; }).forEach(function(r) {
+      console.log('  FAIL: ' + r.label + ' — ' + r.detail);
+    });
+  }
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,619 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Phase 1 H1 — Billing Fields Baseline Test</title>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 16px; background: #f5f6f8; color: #111; }
+  h1 { margin: 0 0 8px; font-size: 18px; }
+  h2 { margin: 20px 0 6px; font-size: 13px; text-transform: uppercase; color: #666; border-bottom: 1px solid #ddd; padding-bottom: 4px; }
+  h3 { margin: 14px 0 4px; font-size: 12px; color: #333; }
+  .summary { padding: 14px 18px; border-radius: 6px; margin: 8px 0 18px; font-size: 18px; font-weight: bold; line-height: 1.45; }
+  .summary.ok { background: #d8f3dc; color: #1b4332; border: 2px solid #2d6a4f; }
+  .summary.bad { background: #ffd6d6; color: #6a040f; border: 2px solid #9d0208; }
+  table { border-collapse: collapse; width: 100%; font-size: 12px; background: #fff; margin-bottom: 6px; }
+  th, td { padding: 6px 8px; border: 1px solid #ddd; text-align: left; vertical-align: top; }
+  th { background: #eef; font-size: 11px; text-transform: uppercase; }
+  tr.pass td { background: #f0faf0; }
+  tr.fail td { background: #ffecec; }
+  tr.detect td { background: #f0faf0; }
+  tr.miss td { background: #ffecec; }
+  tr.agree td { background: #fafafa; color: #777; }
+  .pf { font-weight: bold; }
+  .pf.pass { color: #1b4332; }
+  .pf.fail { color: #9d0208; }
+  .pf.detect { color: #1b4332; }
+  .pf.miss { color: #9d0208; }
+  .pf.agree { color: #999; }
+  .res { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px; word-break: break-word; }
+  .notes { margin-top: 24px; padding: 14px; background: #fff; border: 1px solid #ddd; border-radius: 6px; font-size: 12px; line-height: 1.55; }
+  .notes code { background: #eef; padding: 1px 4px; border-radius: 3px; font-size: 11px; }
+</style>
+</head>
+<body>
+<h1>Phase 1 H1 — Billing Fields Baseline Test</h1>
+<div>Project: flat-roof-inspector | Bug 1 fix: H1 (billing cols O–U never written) + H2 (parseCSZ Shape B) | Rule 27 baseline</div>
+<div id="summary" class="summary">Running...</div>
+
+<h2>NEW-shape scenarios — production-after-splice behavior</h2>
+<div id="newResults"></div>
+
+<h2>OLD-shape regression detection — current production behavior</h2>
+<div id="oldResults"></div>
+
+<div class="notes" id="notes"></div>
+
+<script>
+// =====================================================================
+// SECTION 1 — STEP-1-VERIFIED DEPENDENCIES (paste from phase1_h2_parseCSZ_test.html)
+// =====================================================================
+
+var US_STATE_NAMES = {
+  'alabama':'AL','alaska':'AK','arizona':'AZ','arkansas':'AR','california':'CA',
+  'colorado':'CO','connecticut':'CT','delaware':'DE','florida':'FL','georgia':'GA',
+  'hawaii':'HI','idaho':'ID','illinois':'IL','indiana':'IN','iowa':'IA',
+  'kansas':'KS','kentucky':'KY','louisiana':'LA','maine':'ME','maryland':'MD',
+  'massachusetts':'MA','michigan':'MI','minnesota':'MN','mississippi':'MS','missouri':'MO',
+  'montana':'MT','nebraska':'NE','nevada':'NV','new hampshire':'NH','new jersey':'NJ',
+  'new mexico':'NM','new york':'NY','north carolina':'NC','north dakota':'ND','ohio':'OH',
+  'oklahoma':'OK','oregon':'OR','pennsylvania':'PA','rhode island':'RI','south carolina':'SC',
+  'south dakota':'SD','tennessee':'TN','texas':'TX','utah':'UT','vermont':'VT',
+  'virginia':'VA','washington':'WA','west virginia':'WV','wisconsin':'WI','wyoming':'WY',
+  'district of columbia':'DC'
+};
+var US_STATE_ABBREVS = Object.keys(US_STATE_NAMES).map(function(k){return US_STATE_NAMES[k];});
+
+function parseCSZ(input) {
+  if (!input || typeof input !== 'string') return {city:'', state:'', zip:''};
+  var s = input.trim();
+  if (!s) return {city:'', state:'', zip:''};
+  var zip = '';
+  var zipMatch = s.match(/(\d{5}(?:-\d{4})?)\s*$/);
+  if (zipMatch) {
+    zip = zipMatch[1];
+    s = s.substring(0, zipMatch.index).trim();
+    if (s.charAt(s.length-1) === ',') s = s.substring(0, s.length-1).trim();
+  }
+  var state = '';
+  var sLower = s.toLowerCase();
+  var matchedName = null;
+  var matchedLen = 0;
+  Object.keys(US_STATE_NAMES).forEach(function(name){
+    var idx = sLower.lastIndexOf(name);
+    if (idx === -1) return;
+    if (idx + name.length !== sLower.length) return;
+    if (idx > 0) {
+      var prev = sLower.charAt(idx-1);
+      if (prev !== ' ' && prev !== ',') return;
+    }
+    if (name.length > matchedLen) { matchedName = name; matchedLen = name.length; }
+  });
+  if (matchedName) {
+    state = US_STATE_NAMES[matchedName];
+    s = s.substring(0, s.length - matchedName.length).trim();
+    if (s.charAt(s.length-1) === ',') s = s.substring(0, s.length-1).trim();
+  } else {
+    var abbrevMatch = s.match(/(?:^|[\s,])([A-Za-z]{2})\s*$/);
+    if (abbrevMatch) {
+      var candidate = abbrevMatch[1].toUpperCase();
+      if (US_STATE_ABBREVS.indexOf(candidate) !== -1) {
+        state = candidate;
+        s = s.substring(0, abbrevMatch.index).trim();
+        if (s.charAt(s.length-1) === ',') s = s.substring(0, s.length-1).trim();
+      }
+    }
+  }
+  var city = s.trim();
+  if (city.charAt(city.length-1) === ',') city = city.substring(0, city.length-1).trim();
+  return {city: city, state: state, zip: zip};
+}
+
+// DOM mock helpers
+var mockDOM = {};
+function v(id) { return (mockDOM[id]||'').toString(); }
+function n(id) { return parseFloat(v(id))||0; }
+function formatPhone(p) {
+  var digits = (p||'').replace(/\D/g,'');
+  if (digits.length===10) return digits.substring(0,3)+'-'+digits.substring(3,6)+'-'+digits.substring(6);
+  return p;
+}
+function getBillingDiff() {
+  return mockDOM['__billingDiff'] === true;
+}
+
+// =====================================================================
+// SECTION 2 — PROPOSED FIXED versions (will be spliced into production at Step 3)
+// =====================================================================
+// DESIGN DECISIONS LOCKED IN:
+//   - formatPhone applied to f-bill-phone on BOTH create and update paths
+//     (Option 2 — internal consistency with flat-roof's existing client-phone
+//     pattern; documented divergence from roof-inspector verbatim).
+//   - Col 15 (O = Bill Same as Property) is always-written ('Yes' or 'No').
+//   - Cols 16-21 (P-U) conditional on billingDiff=true AND non-empty value
+//     (non-destructive update semantics preserved for blanks).
+
+function createRegistryRow_NEW(rowsLen, folderLink) {
+  var newRow = new Array(60).fill('');
+  var csz = parseCSZ(v('f-citystatezip'));
+  var billingDiff = getBillingDiff();
+  var billCsz = billingDiff ? parseCSZ(v('f-bill-csz')) : {city:'', state:'', zip:''};
+  var insClaimVal = mockDOM['__insClaimVal'] || 'yes';
+
+  newRow[0] = 'KCC-2026-' + String(rowsLen+1).padStart(3,'0');
+  newRow[1] = new Date().getFullYear().toString();
+  newRow[4] = v('f-address');
+  newRow[5] = csz.city;
+  newRow[6] = csz.state;
+  newRow[7] = csz.zip;
+  newRow[8] = v('f-jobstatus') || 'E';
+  newRow[9] = '';
+  newRow[10] = v('f-client');
+  newRow[11] = formatPhone(v('f-phone'));
+  newRow[12] = v('f-email');
+  // === H1 BILLING FIELDS — begin ===
+  newRow[14] = billingDiff ? 'No' : 'Yes';
+  newRow[15] = billingDiff ? v('f-bill-street') : '';
+  newRow[16] = billingDiff ? billCsz.city : '';
+  newRow[17] = billingDiff ? billCsz.state : '';
+  newRow[18] = billingDiff ? billCsz.zip : '';
+  newRow[19] = billingDiff ? formatPhone(v('f-bill-phone')) : '';
+  newRow[20] = billingDiff ? v('f-bill-email') : '';
+  // === H1 BILLING FIELDS — end ===
+  newRow[21] = insClaimVal === 'yes' ? 'Yes' : 'No';
+  newRow[22] = insClaimVal === 'yes' ? v('f-claimnum') : '';
+  newRow[46] = 'Yes';
+  newRow[52] = folderLink || '';
+  newRow[57] = new Date().toISOString().split('T')[0];
+  return newRow;
+}
+
+function buildRegistryUpdates_NEW(matchRow, folderLink) {
+  var updates = [];
+  var billingDiff = getBillingDiff();
+  var billCsz = billingDiff ? parseCSZ(v('f-bill-csz')) : {city:'', state:'', zip:''};
+  var insClaimVal = mockDOM['__insClaimVal'] || 'yes';
+
+  function addUpdate(col1based, val) {
+    if (val === undefined || val === null || val === '') return;
+    updates.push({col: col1based, value: val});
+  }
+  function addAlwaysUpdate(col1based, val) {
+    updates.push({col: col1based, value: val});
+  }
+
+  addUpdate(9, v('f-jobstatus'));
+  addUpdate(11, v('f-client'));
+  addUpdate(12, formatPhone(v('f-phone')));
+  addUpdate(13, v('f-email'));
+  // === H1 BILLING FIELDS — begin ===
+  addAlwaysUpdate(15, billingDiff ? 'No' : 'Yes');  // col O — always write
+  if (billingDiff) {
+    addUpdate(16, v('f-bill-street'));
+    addUpdate(17, billCsz.city);
+    addUpdate(18, billCsz.state);
+    addUpdate(19, billCsz.zip);
+    addUpdate(20, formatPhone(v('f-bill-phone')));
+    addUpdate(21, v('f-bill-email'));
+  }
+  // === H1 BILLING FIELDS — end ===
+  addAlwaysUpdate(22, insClaimVal === 'yes' ? 'Yes' : 'No');
+  if (insClaimVal === 'yes') addUpdate(23, v('f-claimnum'));
+  addAlwaysUpdate(47, 'Yes');
+  addUpdate(53, folderLink);
+
+  return updates;
+}
+
+// =====================================================================
+// SECTION 3 — PRE-FIX (OLD) shapes for regression-detection
+// =====================================================================
+// Pasted from C:/KCC_Local/flat-roof-inspector/index.html @ HEAD aec0ba7
+//   createRegistryRow at L2881-L2924 (network fetch stripped for test)
+//   buildRegistryUpdates at L3209-L3225 (range string format normalized to {col,value} for asserting)
+// Logic body is UNMODIFIED — only the I/O surface adapted to mockDOM.
+
+function createRegistryRow_OLD(rowsLen, folderLink) {
+  var addr = v('f-address');
+  var cityStateZip = v('f-citystatezip');
+  var parts = cityStateZip.split(',').map(function(s) { return s.trim(); });
+  var city = parts[0] || '';
+  var stateZip = (parts[1] || '').trim().split(/\s+/);
+  var state = stateZip[0] || '';
+  var zip = stateZip[1] || '';
+  var year = new Date().getFullYear().toString();
+  var jobId = 'KCC-2026-' + String(rowsLen+1).padStart(3,'0');
+  var today = new Date().toISOString().split('T')[0];
+  var insClaimVal = mockDOM['__insClaimVal'] || 'yes';
+
+  var newRow = new Array(62).fill('');
+  newRow[0]  = jobId;
+  newRow[1]  = year;
+  newRow[4]  = addr;
+  newRow[5]  = city;
+  newRow[6]  = state;
+  newRow[7]  = zip;
+  newRow[8]  = v('f-jobstatus') || 'E';
+  newRow[9]  = '';
+  newRow[10] = v('f-client');
+  newRow[11] = formatPhone(v('f-phone'));
+  newRow[12] = v('f-email');
+  newRow[21] = insClaimVal === 'yes' ? 'Yes' : 'No';
+  newRow[22] = insClaimVal === 'yes' ? v('f-claimnum') : '';
+  newRow[46] = 'Yes';
+  newRow[52] = folderLink || '';
+  newRow[57] = today;
+  return newRow;
+}
+
+function buildRegistryUpdates_OLD(matchRow, folderLink) {
+  var updates = [];
+  var insClaimVal = mockDOM['__insClaimVal'] || 'yes';
+  function addUpdate(col1based, value) {
+    if (value === undefined || value === null || value === '') return;
+    updates.push({col: col1based, value: value});
+  }
+  var status = v('f-jobstatus'); if (status) addUpdate(9, status);
+  var client = v('f-client'); if (client) addUpdate(11, client);
+  var phone = v('f-phone'); if (phone) addUpdate(12, formatPhone(phone));
+  var email = v('f-email'); if (email) addUpdate(13, email);
+  addUpdate(22, insClaimVal === 'yes' ? 'Yes' : 'No');
+  var claimNum = v('f-claimnum');
+  if (insClaimVal === 'yes' && claimNum) addUpdate(23, claimNum);
+  addUpdate(47, 'Yes');
+  if (folderLink) addUpdate(53, folderLink);
+  return updates;
+}
+
+// =====================================================================
+// SECTION 4 — Test runner
+// =====================================================================
+var newResults = [];
+var oldResults = [];
+
+function fmt(x) {
+  if (x === null) return 'null';
+  if (x === undefined) return 'undefined';
+  if (typeof x === 'object') return JSON.stringify(x);
+  return JSON.stringify(x);
+}
+
+function assertNew(scenario, label, actual, expected) {
+  var pass = (actual === expected);
+  newResults.push({scenario:scenario, label:label, expected:expected, actual:actual, pass:pass, kind:'eq'});
+}
+function assertNewContains(scenario, label, updates, expectedEntry) {
+  var found = updates.find(function(u){ return u.col === expectedEntry.col && u.value === expectedEntry.value; });
+  newResults.push({scenario:scenario, label:label, expected:'contains '+fmt(expectedEntry), actual:found?fmt(found):'not found', pass:!!found, kind:'contains'});
+}
+function assertNewNotContains(scenario, label, updates, colNum) {
+  var found = updates.find(function(u){ return u.col === colNum; });
+  newResults.push({scenario:scenario, label:label, expected:'no entry with col='+colNum, actual:found?fmt(found):'no entry', pass:!found, kind:'notcontains'});
+}
+
+// For OLD scenarios: we re-run the NEW assertion against the OLD output and classify:
+//   - mode='regression': we EXPECTED the NEW assertion to fail (OLD shape produces wrong value).
+//     -> correctly DETECTED if it failed, HARNESS BROKEN if it unexpectedly passed.
+//   - mode='agree': we EXPECTED the NEW assertion to pass (OLD agrees with NEW for this slot).
+//     -> AGREES if it passed, HARNESS BROKEN if it unexpectedly failed.
+function assertOld(scenario, label, actual, newExpected, mode) {
+  var passedAssertion = (actual === newExpected);
+  // For 'regression' mode: a failed assertion is the CORRECT detection.
+  // For 'agree' mode: a passed assertion is the CORRECT outcome.
+  var correct = (mode === 'regression') ? !passedAssertion : passedAssertion;
+  oldResults.push({scenario:scenario, label:label, mode:mode, expected:newExpected, actual:actual, correct:correct, kind:'eq'});
+}
+
+// ---------------------------------------------------------------------
+// NEW-SHAPE SCENARIO A — CREATE, billingDiff=false
+// ---------------------------------------------------------------------
+mockDOM = {
+  'f-address': '123 Main St',
+  'f-citystatezip': 'Akron, OH 44313',
+  'f-jobstatus': 'E',
+  'f-client': 'Acme Corp',
+  'f-phone': '3305551212',
+  'f-email': 'acme@example.com',
+  '__billingDiff': false,
+  '__insClaimVal': 'no'
+};
+var rowA = createRegistryRow_NEW(13, 'https://drive.google.com/test');
+assertNew('A (CREATE bd=false)', 'row[5] city',  rowA[5],  'Akron');
+assertNew('A (CREATE bd=false)', 'row[6] state', rowA[6],  'OH');
+assertNew('A (CREATE bd=false)', 'row[7] zip',   rowA[7],  '44313');
+assertNew('A (CREATE bd=false)', 'row[11] phone formatted', rowA[11], '330-555-1212');
+assertNew('A (CREATE bd=false)', 'row[14] Bill Same as Property', rowA[14], 'Yes');
+assertNew('A (CREATE bd=false)', 'row[15] Billing Street blank',  rowA[15], '');
+assertNew('A (CREATE bd=false)', 'row[16] Billing City blank',    rowA[16], '');
+assertNew('A (CREATE bd=false)', 'row[17] Billing State blank',   rowA[17], '');
+assertNew('A (CREATE bd=false)', 'row[18] Billing ZIP blank',     rowA[18], '');
+assertNew('A (CREATE bd=false)', 'row[19] Billing Phone blank',   rowA[19], '');
+assertNew('A (CREATE bd=false)', 'row[20] Billing Email blank',   rowA[20], '');
+assertNew('A (CREATE bd=false)', 'row[21] Ins Claim Y/N',         rowA[21], 'No');
+assertNew('A (CREATE bd=false)', 'row[22] Claim Number empty',    rowA[22], '');
+
+// ---------------------------------------------------------------------
+// NEW-SHAPE SCENARIO B — CREATE, billingDiff=true, Georgia spelled out
+// ---------------------------------------------------------------------
+mockDOM = {
+  'f-address': '123 Main St',
+  'f-citystatezip': 'Akron, OH 44313',
+  'f-jobstatus': 'J',
+  'f-client': 'Acme Corp',
+  'f-phone': '3305551212',
+  'f-email': 'acme@example.com',
+  'f-bill-street': '456 Peach St',
+  'f-bill-csz': 'Atlanta, Georgia 30303',
+  'f-bill-phone': '4045551234',
+  'f-bill-email': 'billing@example.com',
+  '__billingDiff': true,
+  '__insClaimVal': 'yes',
+  'f-claimnum': 'CL-2026-789'
+};
+var rowB = createRegistryRow_NEW(13, 'https://drive.google.com/test');
+assertNew('B (CREATE bd=true)', 'row[5] city',  rowB[5],  'Akron');
+assertNew('B (CREATE bd=true)', 'row[6] state', rowB[6],  'OH');
+assertNew('B (CREATE bd=true)', 'row[7] zip',   rowB[7],  '44313');
+assertNew('B (CREATE bd=true)', 'row[14] Bill Same as Property', rowB[14], 'No');
+assertNew('B (CREATE bd=true)', 'row[15] Billing Street',        rowB[15], '456 Peach St');
+assertNew('B (CREATE bd=true)', 'row[16] Billing City',          rowB[16], 'Atlanta');
+assertNew('B (CREATE bd=true)', 'row[17] Billing State (Georgia full-name)', rowB[17], 'GA');
+assertNew('B (CREATE bd=true)', 'row[18] Billing ZIP',           rowB[18], '30303');
+assertNew('B (CREATE bd=true)', 'row[19] Billing Phone formatted', rowB[19], '404-555-1234');
+assertNew('B (CREATE bd=true)', 'row[20] Billing Email',         rowB[20], 'billing@example.com');
+assertNew('B (CREATE bd=true)', 'row[21] Ins Claim Y/N',         rowB[21], 'Yes');
+assertNew('B (CREATE bd=true)', 'row[22] Claim Number',          rowB[22], 'CL-2026-789');
+
+// ---------------------------------------------------------------------
+// NEW-SHAPE SCENARIO C — UPDATE, billingDiff=false (re-use Scenario A mockDOM)
+// ---------------------------------------------------------------------
+mockDOM = {
+  'f-address': '123 Main St',
+  'f-citystatezip': 'Akron, OH 44313',
+  'f-jobstatus': 'E',
+  'f-client': 'Acme Corp',
+  'f-phone': '3305551212',
+  'f-email': 'acme@example.com',
+  '__billingDiff': false,
+  '__insClaimVal': 'no'
+};
+var updatesC = buildRegistryUpdates_NEW(5, 'https://drive.google.com/test');
+assertNewContains   ('C (UPDATE bd=false)', 'updates contains {col:15, value:"Yes"}', updatesC, {col:15, value:'Yes'});
+assertNewNotContains('C (UPDATE bd=false)', 'updates does NOT contain col:16',  updatesC, 16);
+assertNewNotContains('C (UPDATE bd=false)', 'updates does NOT contain col:17',  updatesC, 17);
+assertNewNotContains('C (UPDATE bd=false)', 'updates does NOT contain col:18',  updatesC, 18);
+assertNewNotContains('C (UPDATE bd=false)', 'updates does NOT contain col:19',  updatesC, 19);
+assertNewNotContains('C (UPDATE bd=false)', 'updates does NOT contain col:20',  updatesC, 20);
+assertNewNotContains('C (UPDATE bd=false)', 'updates does NOT contain col:21',  updatesC, 21);
+assertNewContains   ('C (UPDATE bd=false)', 'updates contains {col:22, value:"No"}',  updatesC, {col:22, value:'No'});
+
+// ---------------------------------------------------------------------
+// NEW-SHAPE SCENARIO D — UPDATE, billingDiff=true (re-use Scenario B mockDOM)
+// ---------------------------------------------------------------------
+mockDOM = {
+  'f-address': '123 Main St',
+  'f-citystatezip': 'Akron, OH 44313',
+  'f-jobstatus': 'J',
+  'f-client': 'Acme Corp',
+  'f-phone': '3305551212',
+  'f-email': 'acme@example.com',
+  'f-bill-street': '456 Peach St',
+  'f-bill-csz': 'Atlanta, Georgia 30303',
+  'f-bill-phone': '4045551234',
+  'f-bill-email': 'billing@example.com',
+  '__billingDiff': true,
+  '__insClaimVal': 'yes',
+  'f-claimnum': 'CL-2026-789'
+};
+var updatesD = buildRegistryUpdates_NEW(5, 'https://drive.google.com/test');
+assertNewContains('D (UPDATE bd=true)', 'updates contains {col:15, value:"No"}',                  updatesD, {col:15, value:'No'});
+assertNewContains('D (UPDATE bd=true)', 'updates contains {col:16, value:"456 Peach St"}',        updatesD, {col:16, value:'456 Peach St'});
+assertNewContains('D (UPDATE bd=true)', 'updates contains {col:17, value:"Atlanta"}',             updatesD, {col:17, value:'Atlanta'});
+assertNewContains('D (UPDATE bd=true)', 'updates contains {col:18, value:"GA"}',                  updatesD, {col:18, value:'GA'});
+assertNewContains('D (UPDATE bd=true)', 'updates contains {col:19, value:"30303"}',               updatesD, {col:19, value:'30303'});
+assertNewContains('D (UPDATE bd=true)', 'updates contains {col:20, value:"404-555-1234"}',        updatesD, {col:20, value:'404-555-1234'});
+assertNewContains('D (UPDATE bd=true)', 'updates contains {col:21, value:"billing@example.com"}', updatesD, {col:21, value:'billing@example.com'});
+assertNewContains('D (UPDATE bd=true)', 'updates contains {col:22, value:"Yes"}',                 updatesD, {col:22, value:'Yes'});
+assertNewContains('D (UPDATE bd=true)', 'updates contains {col:23, value:"CL-2026-789"}',         updatesD, {col:23, value:'CL-2026-789'});
+
+// ---------------------------------------------------------------------
+// OLD-SHAPE REGRESSION DETECTION — A_OLD (same setup as Scenario A, run on OLD createRegistryRow)
+// Re-run every Scenario A NEW assertion against OLD output.
+//   mode='regression' = we EXPECT the OLD shape to disagree with NEW (test correctly detects the gap).
+//   mode='agree'      = OLD agrees with NEW for this slot in this scenario; assertion is sanity-check.
+// ---------------------------------------------------------------------
+mockDOM = {
+  'f-address': '123 Main St',
+  'f-citystatezip': 'Akron, OH 44313',
+  'f-jobstatus': 'E',
+  'f-client': 'Acme Corp',
+  'f-phone': '3305551212',
+  'f-email': 'acme@example.com',
+  '__billingDiff': false,
+  '__insClaimVal': 'no'
+};
+var rowA_OLD = createRegistryRow_OLD(13, 'https://drive.google.com/test');
+assertOld('A_OLD', 'row[5] city  (OLD parser handles canonical format)',   rowA_OLD[5],  'Akron',         'agree');
+assertOld('A_OLD', 'row[6] state (OLD parser handles canonical format)',   rowA_OLD[6],  'OH',            'agree');
+assertOld('A_OLD', 'row[7] zip   (OLD parser handles canonical format)',   rowA_OLD[7],  '44313',         'agree');
+assertOld('A_OLD', 'row[11] phone (OLD shape formats phone the same)',     rowA_OLD[11], '330-555-1212',  'agree');
+assertOld('A_OLD', 'row[14] H1 GAP — OLD leaves Bill Same blank',          rowA_OLD[14], 'Yes',           'regression');
+assertOld('A_OLD', 'row[15] OLD leaves blank (NEW also blank when bd=false)', rowA_OLD[15], '',           'agree');
+assertOld('A_OLD', 'row[16] OLD leaves blank (NEW also blank when bd=false)', rowA_OLD[16], '',           'agree');
+assertOld('A_OLD', 'row[17] OLD leaves blank (NEW also blank when bd=false)', rowA_OLD[17], '',           'agree');
+assertOld('A_OLD', 'row[18] OLD leaves blank (NEW also blank when bd=false)', rowA_OLD[18], '',           'agree');
+assertOld('A_OLD', 'row[19] OLD leaves blank (NEW also blank when bd=false)', rowA_OLD[19], '',           'agree');
+assertOld('A_OLD', 'row[20] OLD leaves blank (NEW also blank when bd=false)', rowA_OLD[20], '',           'agree');
+assertOld('A_OLD', 'row[21] Ins Claim (OLD agrees)',                       rowA_OLD[21], 'No',            'agree');
+assertOld('A_OLD', 'row[22] Claim Number (OLD agrees)',                    rowA_OLD[22], '',              'agree');
+
+// ---------------------------------------------------------------------
+// OLD-SHAPE REGRESSION DETECTION — B_OLD (same setup as Scenario B, run on OLD createRegistryRow)
+// ---------------------------------------------------------------------
+mockDOM = {
+  'f-address': '123 Main St',
+  'f-citystatezip': 'Akron, OH 44313',
+  'f-jobstatus': 'J',
+  'f-client': 'Acme Corp',
+  'f-phone': '3305551212',
+  'f-email': 'acme@example.com',
+  'f-bill-street': '456 Peach St',
+  'f-bill-csz': 'Atlanta, Georgia 30303',
+  'f-bill-phone': '4045551234',
+  'f-bill-email': 'billing@example.com',
+  '__billingDiff': true,
+  '__insClaimVal': 'yes',
+  'f-claimnum': 'CL-2026-789'
+};
+var rowB_OLD = createRegistryRow_OLD(13, 'https://drive.google.com/test');
+assertOld('B_OLD', 'row[5] city  (OLD parser handles canonical format)',   rowB_OLD[5],  'Akron',         'agree');
+assertOld('B_OLD', 'row[6] state (OLD parser handles canonical format)',   rowB_OLD[6],  'OH',            'agree');
+assertOld('B_OLD', 'row[7] zip   (OLD parser handles canonical format)',   rowB_OLD[7],  '44313',         'agree');
+assertOld('B_OLD', 'row[14] H1 GAP — OLD leaves Bill Same blank',          rowB_OLD[14], 'No',            'regression');
+assertOld('B_OLD', 'row[15] H1 GAP — OLD leaves Billing Street blank',     rowB_OLD[15], '456 Peach St',  'regression');
+assertOld('B_OLD', 'row[16] H1 GAP — OLD leaves Billing City blank',       rowB_OLD[16], 'Atlanta',       'regression');
+assertOld('B_OLD', 'row[17] H1+H2 GAP — OLD never parses bill CSZ',        rowB_OLD[17], 'GA',            'regression');
+assertOld('B_OLD', 'row[18] H1 GAP — OLD leaves Billing ZIP blank',        rowB_OLD[18], '30303',         'regression');
+assertOld('B_OLD', 'row[19] H1 GAP — OLD leaves Billing Phone blank',      rowB_OLD[19], '404-555-1234',  'regression');
+assertOld('B_OLD', 'row[20] H1 GAP — OLD leaves Billing Email blank',      rowB_OLD[20], 'billing@example.com', 'regression');
+assertOld('B_OLD', 'row[21] Ins Claim (OLD agrees)',                       rowB_OLD[21], 'Yes',           'agree');
+assertOld('B_OLD', 'row[22] Claim Number (OLD agrees)',                    rowB_OLD[22], 'CL-2026-789',   'agree');
+
+// =====================================================================
+// RENDER
+// =====================================================================
+function esc(x){
+  if (x === null) return '<em>null</em>';
+  if (x === undefined) return '<em>undefined</em>';
+  return String(x).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+var newPass = newResults.filter(function(r){return r.pass;}).length;
+var newTotal = newResults.length;
+
+var oldRegressions = oldResults.filter(function(r){return r.mode==='regression';});
+var oldAgrees = oldResults.filter(function(r){return r.mode==='agree';});
+var oldRegrCorrect = oldRegressions.filter(function(r){return r.correct;}).length;
+var oldRegrTotal = oldRegressions.length;
+var oldAgreeCorrect = oldAgrees.filter(function(r){return r.correct;}).length;
+var oldAgreeTotal = oldAgrees.length;
+
+var allGood = (newPass === newTotal) && (oldRegrCorrect === oldRegrTotal) && (oldAgreeCorrect === oldAgreeTotal);
+
+var summaryEl = document.getElementById('summary');
+summaryEl.className = 'summary ' + (allGood ? 'ok' : 'bad');
+summaryEl.innerHTML =
+  (allGood ? '✓ ' : '✗ ') +
+  'NEW: ' + newPass + ' / ' + newTotal + ' PASS' +
+  ' &nbsp;|&nbsp; ' +
+  'OLD regression detect: ' + oldRegrCorrect + ' / ' + oldRegrTotal + ' correctly failed' +
+  ' &nbsp;|&nbsp; ' +
+  'OLD agreement check: ' + oldAgreeCorrect + ' / ' + oldAgreeTotal + ' correctly passed';
+
+// Render NEW results grouped by scenario
+function renderNew() {
+  var container = document.getElementById('newResults');
+  var scenarios = {};
+  newResults.forEach(function(r){
+    if (!scenarios[r.scenario]) scenarios[r.scenario] = [];
+    scenarios[r.scenario].push(r);
+  });
+  Object.keys(scenarios).forEach(function(scn){
+    var list = scenarios[scn];
+    var passN = list.filter(function(r){return r.pass;}).length;
+    var h3 = document.createElement('h3');
+    h3.textContent = 'Scenario ' + scn + ' — ' + passN + ' / ' + list.length + ' PASS';
+    container.appendChild(h3);
+    var table = document.createElement('table');
+    table.innerHTML = '<tr><th>#</th><th>Assertion</th><th>Expected</th><th>Actual</th><th>P/F</th></tr>';
+    list.forEach(function(r, i){
+      var tr = document.createElement('tr');
+      tr.className = r.pass ? 'pass' : 'fail';
+      tr.innerHTML = '<td>'+(i+1)+'</td>'
+        + '<td>'+esc(r.label)+'</td>'
+        + '<td class="res">'+esc(r.expected)+'</td>'
+        + '<td class="res">'+esc(r.actual)+'</td>'
+        + '<td class="pf '+(r.pass?'pass':'fail')+'">'+(r.pass?'PASS':'FAIL')+'</td>';
+      table.appendChild(tr);
+    });
+    container.appendChild(table);
+  });
+}
+renderNew();
+
+// Render OLD results grouped by scenario
+function renderOld() {
+  var container = document.getElementById('oldResults');
+  var scenarios = {};
+  oldResults.forEach(function(r){
+    if (!scenarios[r.scenario]) scenarios[r.scenario] = [];
+    scenarios[r.scenario].push(r);
+  });
+  Object.keys(scenarios).forEach(function(scn){
+    var list = scenarios[scn];
+    var regr = list.filter(function(r){return r.mode==='regression';});
+    var agree = list.filter(function(r){return r.mode==='agree';});
+    var regrOK = regr.filter(function(r){return r.correct;}).length;
+    var agreeOK = agree.filter(function(r){return r.correct;}).length;
+    var h3 = document.createElement('h3');
+    h3.textContent = 'Scenario ' + scn + ' — regression detect: ' + regrOK + ' / ' + regr.length + ' | agreement: ' + agreeOK + ' / ' + agree.length;
+    container.appendChild(h3);
+    var table = document.createElement('table');
+    table.innerHTML = '<tr><th>#</th><th>Assertion</th><th>Mode</th><th>NEW expects</th><th>OLD actual</th><th>Outcome</th></tr>';
+    list.forEach(function(r, i){
+      var outcomeText, cls;
+      if (r.mode === 'regression') {
+        if (r.correct) { outcomeText = 'REGRESSION CORRECTLY DETECTED'; cls = 'detect'; }
+        else { outcomeText = 'HARNESS BROKEN — OLD unexpectedly produced NEW value'; cls = 'miss'; }
+      } else {
+        if (r.correct) { outcomeText = 'AGREES (no regression in this slot)'; cls = 'agree'; }
+        else { outcomeText = 'HARNESS BROKEN — OLD unexpectedly diverged from NEW'; cls = 'miss'; }
+      }
+      var tr = document.createElement('tr');
+      tr.className = cls;
+      tr.innerHTML = '<td>'+(i+1)+'</td>'
+        + '<td>'+esc(r.label)+'</td>'
+        + '<td><strong>'+r.mode+'</strong></td>'
+        + '<td class="res">'+esc(r.expected)+'</td>'
+        + '<td class="res">'+esc(r.actual)+'</td>'
+        + '<td class="pf '+cls+'">'+outcomeText+'</td>';
+      table.appendChild(tr);
+    });
+    container.appendChild(table);
+  });
+}
+renderOld();
+
+// Render bottom notes
+var notes = document.getElementById('notes');
+notes.innerHTML =
+  '<strong>How to run this test:</strong><br>'
+  + '1. Open Windows Explorer.<br>'
+  + '2. Navigate to <code>C:\\KCC_Local\\flat-roof-inspector\\test\\</code><br>'
+  + '3. Double-click <code>phase1_h1_billing_test.html</code>.<br>'
+  + '4. The page opens in your default browser and auto-runs.<br>'
+  + '5. Check the top banner.<br>'
+  + '<br>'
+  + '<strong>Expected result:</strong> top banner GREEN, '
+  + 'NEW '+newTotal+'/'+newTotal+' PASS, '
+  + 'OLD regression detect '+oldRegrTotal+'/'+oldRegrTotal+' correctly failed, '
+  + 'OLD agreement '+oldAgreeTotal+'/'+oldAgreeTotal+' correctly passed.<br>'
+  + '<br>'
+  + '<strong>If banner is RED:</strong> paste the failing row(s) back to Claude — diagnosis before Step 3 splice.';
+
+// Console summary
+console.log('=== Phase 1 H1 Billing Fields Baseline Test ===');
+console.log('NEW: '+newPass+' / '+newTotal+' PASS');
+console.log('OLD regression: '+oldRegrCorrect+' / '+oldRegrTotal+' correctly failed');
+console.log('OLD agreement: '+oldAgreeCorrect+' / '+oldAgreeTotal+' correctly passed');
+if (!allGood) {
+  console.log('FAILURES:');
+  newResults.filter(function(r){return !r.pass;}).forEach(function(r){
+    console.log('  NEW '+r.scenario+': '+r.label+' -- expected: '+fmt(r.expected)+' actual: '+fmt(r.actual));
+  });
+  oldResults.filter(function(r){return !r.correct;}).forEach(function(r){
+    console.log('  OLD '+r.scenario+' ('+r.mode+'): '+r.label+' -- NEW expects: '+fmt(r.expected)+' OLD actual: '+fmt(r.actual));
+  });
+}
+</script>
+</body>
+</html>

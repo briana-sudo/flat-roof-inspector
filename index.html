@@ -1537,6 +1537,7 @@ function handlePhoto(event,secId,facetIdx){
       var newIdx=arr.length-1;
       renderPhotoCard2(secId,facetIdx,newIdx,document.getElementById('pgrid-'+secId+'-f'+facetIdx));
       updatePhotoCount2(secId,facetIdx);updatePhotoStatus();
+      autoSave();  // Phase 2 H1 follow-up — flush new entry to localStorage so restoreData finds the photoId reference.
     };
     img.src=e.target.result;
   };
@@ -1611,6 +1612,7 @@ function deletePhoto2(secId,facetIdx,idx){
   }
   updatePhotoCount2(secId,facetIdx);updatePhotoStatus();
   var ssBtn=document.getElementById('secSave-'+sid);if(ssBtn)ssBtn.style.display=f.photos[secId].length?'block':'none';
+  autoSave();  // Phase 2 H1 follow-up — flush splice to localStorage so restored facetList reflects the delete.
 }
 
 function downloadSectionPhotos2(secId,facetIdx){

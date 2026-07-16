@@ -357,6 +357,7 @@ body{background:var(--bg);color:var(--text);font-family:sans-serif;font-size:16p
         <option value="C">C — Complete</option>
         <option value="X">X — Closed</option>
         <option value="L">L — Lost</option>
+        <option value="N">N — No Bid</option>
       </select>
     </div>
     <div class="field-row">
@@ -2924,11 +2925,73 @@ function autoFormatPhone(el) {
   autoSave();
 }
 
+// ---- Request Type column (July 16 2026) ----------------------------------
+// Resolved AT RUNTIME by exact header text (row 3), never by a hardcoded index.
+// Currently lives at BX (index 75) — but DO NOT hardcode that.
+//
+// Why header lookup, not a fixed index:
+//   1. This app's newRow array is 62 wide; the live Job Registry is 76 columns
+//      (A..BX). The array does NOT mirror the sheet, so "the end" is not
+//      derivable from anything in this file.
+//   2. Every OTHER writer resolves this field by header name — docs@
+//      writeRequestType via getOrCreateColumn, closeout-write via createMissing,
+//      MorningBrief pm_gaps by dict key. Matching on the header is what keeps
+//      four independent writers landing on the same column.
+//   3. Append-to-end is the standing rule, so the index moves whenever a column
+//      is added. A hardcoded index survives exactly until the next append.
+//
+// REQTYPE_COL = -1 when the header is absent → every write below is skipped and
+// behaviour is byte-for-byte unchanged. The lookup never rejects and never
+// blocks the registry write.
+//
+// NOTE for the next reader: an earlier draft of this comment claimed columns
+// BI/BJ/BL/BP/BQ/BR/BW hold live data under BLANK row-3 headers. That was FALSE
+// — an artifact of reading the sheet over gviz, which blanks numeric-column
+// headers (see CLAUDE.md). Verified via the service-account read-tab endpoint:
+// all 76 columns have headers, zero blanks. Read the sheet with read-tab, never
+// gviz, before making any claim about its shape.
+var REQTYPE_COL = -1; // 1-based sheet column; -1 = header not present
+function resolveReqTypeCol(token) {
+  return fetch('https://sheets.googleapis.com/v4/spreadsheets/' + SHEETS_REGISTRY_ID +
+    '/values/Job%20Registry!A3:ZZ3', {
+    headers: {'Authorization': 'Bearer ' + token}
+  }).then(function(r) {
+    if (!r.ok) return null;
+    return r.json();
+  }).then(function(d) {
+    var hdr = (d && d.values && d.values[0]) || [];
+    REQTYPE_COL = -1;
+    for (var i = 0; i < hdr.length; i++) {
+      if (String(hdr[i] || '').trim() === 'Request Type') { REQTYPE_COL = i + 1; break; }
+    }
+  }).catch(function() {
+    REQTYPE_COL = -1; // never block the registry write on this lookup
+  });
+}
+
+// Files Request Type into an already-written row. Used by the CREATE path, whose
+// fixed-width 62-value append cannot reach a column past BJ. Non-blocking:
+// Request Type is advisory, so a failure here never fails the submit.
+function writeReqTypeCell(token, targetRow, callback) {
+  var reqType = v('f-reqtype');
+  if (REQTYPE_COL < 1 || !reqType || !targetRow) { callback(); return; }
+  fetch('https://sheets.googleapis.com/v4/spreadsheets/' + SHEETS_REGISTRY_ID +
+    '/values/Job%20Registry!' + col1basedToLetter(REQTYPE_COL) + targetRow +
+    '?valueInputOption=USER_ENTERED', {
+    method: 'PUT',
+    headers: {'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json'},
+    body: JSON.stringify({values: [[reqType]]})
+  }).then(function(){ callback(); }).catch(function(){ callback(); });
+}
+
 function writeToRegistry(token, folderLink, callback) {
   var addr = v('f-address');
   if (!addr) { if (callback) callback(null); return; }
 
-  fetch('https://sheets.googleapis.com/v4/spreadsheets/' + SHEETS_REGISTRY_ID +
+  // Resolve the Request Type column by header before the row work, so both the
+  // update and create branches below can use it. Never rejects.
+  resolveReqTypeCol(token).then(function() {
+  return fetch('https://sheets.googleapis.com/v4/spreadsheets/' + SHEETS_REGISTRY_ID +
     '/values/Job%20Registry!A4:BJ', {
     headers: {'Authorization': 'Bearer ' + token}
   }).then(function(r) {
@@ -2993,6 +3056,7 @@ function writeToRegistry(token, folderLink, callback) {
         callback(null);
       });
     }
+  });
   }).catch(function(e) { callback(e.message||String(e)); });
 }
 
@@ -3042,7 +3106,13 @@ function createRegistryRow(token, rows, folderLink, callback) {
     if(!r.ok){ return r.json().then(function(e){ throw new Error('Registry append '+r.status+': '+(e.error&&e.error.message||JSON.stringify(e))); }); }
     return r.json();
   })
-  .then(function() { callback(null, jobId); })
+  .then(function(res) {
+    // Request Type lives past BJ, so the fixed-width append above cannot carry
+    // it. The append picks the row, so recover it from updatedRange
+    // ("Job Registry!A35:BJ35" -> 35). Non-blocking: the row is committed.
+    var m = String((res && res.updates && res.updates.updatedRange) || '').match(/!\$?[A-Z]+\$?(\d+)/);
+    writeReqTypeCell(token, m ? m[1] : null, function(){ callback(null, jobId); });
+  })
   .catch(function(e) { callback(e.message||String(e), null); });
 }
 
@@ -3359,6 +3429,7 @@ function buildRegistryUpdates(targetRow, folderLink) {
     updates.push({range: 'Job Registry!' + col1basedToLetter(col1based) + targetRow, values: [[value]]});
   }
   var status = v('f-jobstatus'); if (status) addUpdate(9, status);
+  if (REQTYPE_COL > 0) addUpdate(REQTYPE_COL, v('f-reqtype')); // Request Type (header-resolved)
   var client = v('f-client'); if (client) addUpdate(11, client);
   var phone = v('f-phone'); if (phone) addUpdate(12, formatPhone(phone));
   var email = v('f-email'); if (email) addUpdate(13, email);

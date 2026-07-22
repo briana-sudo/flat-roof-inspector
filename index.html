@@ -335,30 +335,20 @@ body{background:var(--bg);color:var(--text);font-family:sans-serif;font-size:16p
   <div class="sec-hdr" onclick="toggleSec('classify')"><span class="sec-icon">&#128196;</span><span class="sec-title">Classification</span><span class="sec-chev open" id="chev-classify">v</span></div>
   <div class="sec-body open" id="body-classify">
     <div class="field-row">
-      <div class="field-label">Request Type</div>
-      <div class="field-hint">Routes to the correct estimating engine</div>
-      <select class="field-select" id="f-reqtype" onchange="autoSave()">
+      <div class="field-label">Category</div>
+      <select class="field-select" id="f-category" onchange="setCategory()">
         <option value="">-- select --</option>
-        <option value="Inspect">Inspect</option>
-        <option value="Budget Estimate">Budget Estimate</option>
-        <option value="Estimate">Estimate</option>
-        <option value="Insurance Estimate">Insurance Estimate</option>
-        <option value="Contract">Contract</option>
+        <option value="inspect">Inspect</option>
+        <option value="estimate">Estimate</option>
+        <option value="job">Job</option>
       </select>
-    </div>
-    <div class="field-row">
-      <div class="field-label">Job Status</div>
-      <div class="field-hint">Writes to Job Registry on submit</div>
-      <select class="field-select" id="f-jobstatus" onchange="autoSave()">
-        <option value="">-- select --</option>
-        <option value="E">E — Estimate</option>
-        <option value="J">J — Job</option>
-        <option value="H">H — Hold</option>
-        <option value="C">C — Complete</option>
-        <option value="X">X — Closed</option>
-        <option value="L">L — Lost</option>
-        <option value="N">N — No Bid</option>
-      </select>
+      <div class="field-hint">Inspect = insurance hold (inspect only, no EagleView until the claim is approved) &middot; Estimate = retail or approved claim &middot; Job = contracted</div>
+      <!-- One picker drives the two registry columns the gate machine reads.
+           f-reqtype (Request Type) + f-jobstatus (Job Status) are derived by
+           setCategory() and still written to the Job Registry on submit,
+           exactly as before — only the UI collapses. -->
+      <input type="hidden" id="f-reqtype">
+      <input type="hidden" id="f-jobstatus">
     </div>
     <div class="field-row">
       <div class="field-label">Insurance Claim</div>
@@ -498,6 +488,10 @@ body{background:var(--bg);color:var(--text);font-family:sans-serif;font-size:16p
   <div id="photoFacetBar" style="display:none;padding:8px 16px 0;"></div>
   <div id="photo-sections-container"></div>
   <button class="reset-btn" onclick="resetPhotos()">Clear all photos</button>
+  <!-- ROOF-LEVEL photo sections — ONE set for the whole roof, not per facet. -->
+  <div style="padding:14px 16px 4px;font-size:12px;font-weight:bold;text-transform:uppercase;letter-spacing:.5px;color:#c40001;border-top:2px solid #c40001;margin-top:14px;">Roof-Level Photos <span style="font-weight:normal;text-transform:none;color:#9aa0b0;letter-spacing:0;">— one set for the whole roof</span></div>
+  <div id="roof-photo-sections-container"></div>
+  <button class="reset-btn" onclick="resetRoofPhotos()">Clear roof-level photos</button>
   <div class="action-bar" id="bar-photos">
     <button class="submit-btn" onclick="submitInspection()">Submit Inspection to Drive</button>
     <button class="dl-all-btn" onclick="downloadAllPhotos()">Download All Unsaved</button>
@@ -539,6 +533,33 @@ var FACET_PHOTO_SECTIONS = [
   {id:'copingdmg',  label:'Clay Coping Damage',     slots:[]},
   {id:'problems',   label:'Problem Areas',          slots:[]}
 ];
+
+// ROOF-LEVEL photo sections (July 22 2026) — ONE set for the WHOLE roof, NOT
+// per facet. The regular sections above stay per-facet; these three damage
+// groups are roof-level so they do not repeat for every facet A/B/C. They use
+// their own roof-level store (roofPhotos) + capture/upload/summary path
+// (buildRoofPhotoSections / handleRoofPhoto / the roof upload stage in
+// runSubmit), parallel to the per-facet f.photos[secId] flow but keyed once.
+var ROOF_PHOTO_SECTIONS = [
+  // Roof Test Squares — four directional blocks (N/S/E/W), each an Overview
+  // bucket plus a Hail Hits close-up bucket (same structure as the shingle app).
+  {id:'ts-n-ov', label:'Test Sq North — Overview', slots:[]},
+  {id:'ts-n-hh', label:'Test Sq North — Hail Hits', slots:[]},
+  {id:'ts-s-ov', label:'Test Sq South — Overview', slots:[]},
+  {id:'ts-s-hh', label:'Test Sq South — Hail Hits', slots:[]},
+  {id:'ts-e-ov', label:'Test Sq East — Overview', slots:[]},
+  {id:'ts-e-hh', label:'Test Sq East — Hail Hits', slots:[]},
+  {id:'ts-w-ov', label:'Test Sq West — Overview', slots:[]},
+  {id:'ts-w-hh', label:'Test Sq West — Hail Hits', slots:[]},
+  // Simple damage-documentation groups (multi-photo).
+  {id:'winddamage', label:'Wind Damage', slots:[]},
+  {id:'otherdamage', label:'Other Damage', slots:[]}
+];
+// roofPhotos: roof-level analogue of f.photos — one array of photo entries per
+// ROOF_PHOTO_SECTIONS id (entry shape identical to facet photos:
+// {photoId, dataURL, caption, label, sectionLabel, uploaded}).
+var roofPhotos = {};
+ROOF_PHOTO_SECTIONS.forEach(function(s){ roofPhotos[s.id] = []; });
 
 var PENETRATION_TYPES = [
   {id:'pipeboots',   label:'Pipe boots'},
@@ -1631,6 +1652,11 @@ function downloadAllPhotos(){
       });
     });
   });
+  ROOF_PHOTO_SECTIONS.forEach(function(sec){
+    (roofPhotos[sec.id]||[]).forEach(function(p,i){
+      if(!p.uploaded){setTimeout(function(){downloadRoofPhoto(sec.id,i);},delay);delay+=700;}
+    });
+  });
 }
 
 function updatePhotoStatus(){
@@ -1641,6 +1667,11 @@ function updatePhotoStatus(){
       total+=arr.length;
       arr.forEach(function(p){if(!p.uploaded)unsaved++;});
     });
+  });
+  ROOF_PHOTO_SECTIONS.forEach(function(sec){
+    var arr=roofPhotos[sec.id]||[];
+    total+=arr.length;
+    arr.forEach(function(p){if(!p.uploaded)unsaved++;});
   });
   var badge=document.getElementById('photo-badge');if(badge){badge.textContent=total;badge.className=total>0?'tab-badge show':'tab-badge';}
   var bar=document.getElementById('photoStatus');
@@ -1659,6 +1690,177 @@ function resetPhotos(){
   buildPhotoSections();updatePhotoStatus();
 }
 
+// ══════════════════════════════════════════════════════════════════
+// ROOF-LEVEL PHOTO SYSTEM (one set for the whole roof, not per facet)
+// Parallel to the per-facet system above; entries keyed in roofPhotos[secId].
+// Reuses the EXACT same 800px@0.75 compress, the shared IDB photo store
+// (savePhotoToDB/deletePhotoFromDB by photoId), and the same Drive upload +
+// PhotoReport + summary helpers. DOM ids use an 'r' prefix (rpsec/rpgrid/rpcard
+// /rpcount/rpnone/rpfile/rpcap/rpdl/rpind/rsecSave) so they never collide with
+// the per-facet 'psec/pgrid/...-fN' ids.
+// ══════════════════════════════════════════════════════════════════
+function buildRoofPhotoSections(){
+  var container=document.getElementById('roof-photo-sections-container');
+  if(!container)return;
+  container.innerHTML='';
+  ROOF_PHOTO_SECTIONS.forEach(function(sec){
+    var sid=sec.id;
+    var div=document.createElement('div');div.className='section';div.id='rpsec-'+sid;
+    var hdr=document.createElement('div');hdr.className='sec-hdr';
+    hdr.onclick=(function(id){return function(){toggleSec('rp-'+id);};})(sid);
+    var icon=document.createElement('span');icon.className='sec-icon';icon.textContent='📷';
+    var title=document.createElement('span');title.className='sec-title';title.textContent=sec.label;
+    var count=document.createElement('span');count.className='sec-count';count.id='rpcount-'+sid;
+    var cnt=roofPhotos[sec.id]?roofPhotos[sec.id].length:0;
+    count.textContent=cnt>0?cnt+' photo'+(cnt!==1?'s':''):'0 photos';
+    var chev=document.createElement('span');chev.className='sec-chev';chev.id='chev-rp-'+sid;chev.textContent='v';
+    hdr.appendChild(icon);hdr.appendChild(title);hdr.appendChild(count);hdr.appendChild(chev);
+    var body=document.createElement('div');body.className='sec-body';body.id='body-rp-'+sid;
+    var inner=document.createElement('div');inner.className='photo-sec-body';
+    var btn1=document.createElement('button');btn1.className='add-photo-btn';btn1.textContent='+ Add Photo';
+    btn1.onclick=(function(s){return function(){triggerRoofPhoto(s);};})(sec.id);
+    var finput=document.createElement('input');finput.type='file';finput.className='photo-file-input';finput.id='rpfile-'+sid;finput.accept='image/*';finput.setAttribute('capture','environment');
+    finput.onchange=(function(s){return function(e){handleRoofPhoto(e,s);};})(sec.id);
+    var grid=document.createElement('div');grid.className='photo-grid';grid.id='rpgrid-'+sid;
+    var none=document.createElement('div');none.className='no-photos-msg';none.id='rpnone-'+sid;
+    none.style.display=(roofPhotos[sec.id]&&roofPhotos[sec.id].length)?'none':'block';
+    none.textContent='No photos yet';
+    grid.appendChild(none);
+    if(roofPhotos[sec.id]){
+      roofPhotos[sec.id].forEach(function(p,pi){renderRoofPhotoCard(sec.id,pi,grid);});
+    }
+    var btn2=document.createElement('button');btn2.className='add-photo-btn';btn2.style.marginTop='12px';btn2.style.marginBottom='0';btn2.textContent='+ Add Photo';
+    btn2.onclick=(function(s){return function(){triggerRoofPhoto(s);};})(sec.id);
+    var saveBtn=document.createElement('button');saveBtn.className='sec-save-btn';saveBtn.id='rsecSave-'+sid;
+    saveBtn.style.display=(roofPhotos[sec.id]&&roofPhotos[sec.id].length)?'block':'none';
+    saveBtn.textContent='Download All in This Section';
+    saveBtn.onclick=(function(s){return function(){downloadSectionRoofPhotos(s);};})(sec.id);
+    var hint=document.createElement('div');hint.className='lp-hint';hint.textContent='Long-press photo to Save to Camera Roll';
+    inner.appendChild(btn1);inner.appendChild(finput);inner.appendChild(grid);inner.appendChild(btn2);inner.appendChild(saveBtn);inner.appendChild(hint);
+    body.appendChild(inner);div.appendChild(hdr);div.appendChild(body);container.appendChild(div);
+  });
+}
+
+function triggerRoofPhoto(secId){
+  document.getElementById('rpfile-'+secId).click();
+}
+
+function handleRoofPhoto(event,secId){
+  var file=event.target.files[0];if(!file)return;
+  var reader=new FileReader();
+  reader.onload=function(e){
+    var img=new Image();
+    img.onload=function(){
+      var sec=null;ROOF_PHOTO_SECTIONS.forEach(function(s){if(s.id===secId)sec=s;});
+      var arr=roofPhotos[secId];
+      var idx=arr.length;
+      var slotLabel=(sec&&sec.slots&&sec.slots[idx])?sec.slots[idx]:(sec?sec.label.split(' ').map(function(w){return w[0];}).join('').toUpperCase()+(idx+1):'P'+(idx+1));
+      var maxW=800;var ratio=Math.min(1,maxW/img.width);
+      var BAR=50;var canvas=document.createElement('canvas');
+      canvas.width=img.width*ratio;canvas.height=img.height*ratio+BAR;
+      var ctx=canvas.getContext('2d');
+      ctx.fillStyle='#111214';ctx.fillRect(0,0,canvas.width,BAR);
+      ctx.fillStyle='#c40001';ctx.fillRect(0,0,canvas.width,3);
+      var addr=[v('f-address'),v('f-citystatezip')].filter(Boolean).join(', ')||'No address';
+      ctx.fillStyle='#f0f2f5';ctx.font='bold '+Math.max(13,Math.floor(canvas.width*0.022))+'px sans-serif';
+      ctx.fillText('KCC -- '+addr,12,20);
+      ctx.fillStyle='#9aa0b0';ctx.font=Math.max(11,Math.floor(canvas.width*0.018))+'px sans-serif';
+      ctx.fillText((sec?sec.label:secId)+' - '+slotLabel,12,40);
+      ctx.drawImage(img,0,BAR,canvas.width,img.height*ratio);
+      var dataURL=canvas.toDataURL('image/jpeg',0.65);
+      var photoId=(window.crypto&&crypto.randomUUID)?crypto.randomUUID():('p_'+Date.now()+'_'+Math.random().toString(36).substring(2,10));
+      var entry={photoId:photoId,dataURL:dataURL,caption:'',label:slotLabel,sectionLabel:sec?sec.label:secId,uploaded:false};
+      arr.push(entry);
+      savePhotoToDB(photoId,dataURL).catch(function(e){console.warn('savePhotoToDB failed:',e);});
+      var newIdx=arr.length-1;
+      renderRoofPhotoCard(secId,newIdx,document.getElementById('rpgrid-'+secId));
+      updateRoofPhotoCount(secId);updatePhotoStatus();
+      autoSave();
+    };
+    img.src=e.target.result;
+  };
+  reader.readAsDataURL(file);event.target.value='';
+}
+
+function renderRoofPhotoCard(secId,idx,grid){
+  var sid=secId;
+  if(!grid)grid=document.getElementById('rpgrid-'+sid);
+  var none=document.getElementById('rpnone-'+sid);if(none)none.style.display='none';
+  if(!roofPhotos[secId]||!roofPhotos[secId][idx])return;
+  var entry=roofPhotos[secId][idx];
+  var cardId='rpcard-'+sid+'-'+idx;if(document.getElementById(cardId))return;
+  var card=document.createElement('div');card.className='photo-card unsaved';card.id=cardId;
+  var ind=document.createElement('div');ind.className='photo-ind red';ind.id='rpind-'+sid+'-'+idx;
+  var img=document.createElement('img');img.src=entry.dataURL;img.loading='lazy';img.style.width='100%';img.style.display='block';
+  var ctrls=document.createElement('div');ctrls.className='photo-ctrls';
+  var lbl=document.createElement('div');lbl.className='photo-label-tag';lbl.textContent=entry.label;
+  var cap=document.createElement('input');cap.type='text';cap.className='photo-caption';cap.placeholder='Add caption...';cap.id='rpcap-'+sid+'-'+idx;
+  cap.oninput=(function(s,i){return function(){if(roofPhotos[s]&&roofPhotos[s][i])roofPhotos[s][i].caption=this.value;};})(secId,idx);
+  var btnRow=document.createElement('div');btnRow.className='photo-btn-row';
+  var dlBtn=document.createElement('button');dlBtn.className='photo-dl-btn';dlBtn.id='rpdl-'+sid+'-'+idx;dlBtn.textContent='Download';
+  dlBtn.onclick=(function(s,i){return function(){downloadRoofPhoto(s,i);};})(secId,idx);
+  var delBtn=document.createElement('button');delBtn.className='photo-del-btn';delBtn.textContent='Delete';
+  delBtn.onclick=(function(s,i){return function(){deleteRoofPhoto(s,i);};})(secId,idx);
+  btnRow.appendChild(dlBtn);btnRow.appendChild(delBtn);
+  ctrls.appendChild(lbl);ctrls.appendChild(cap);ctrls.appendChild(btnRow);
+  card.appendChild(ind);card.appendChild(img);card.appendChild(ctrls);
+  if(grid)grid.appendChild(card);
+  var ssBtn=document.getElementById('rsecSave-'+sid);if(ssBtn)ssBtn.style.display='block';
+}
+
+function updateRoofPhotoCount(secId){
+  var cnt=roofPhotos[secId]?roofPhotos[secId].length:0;
+  var el=document.getElementById('rpcount-'+secId);if(el)el.textContent=cnt+' photo'+(cnt!==1?'s':'');
+}
+
+function downloadRoofPhoto(secId,idx){
+  if(!roofPhotos[secId]||!roofPhotos[secId][idx])return;
+  var entry=roofPhotos[secId][idx];
+  var a=document.createElement('a');a.href=entry.dataURL;
+  a.download='FlatRoof-Roof-'+entry.label.replace(/\s+/g,'-')+'.jpg';a.click();
+  setTimeout(function(){markRoofPhotoUploaded(secId,idx);},600);
+}
+
+function markRoofPhotoUploaded(secId,idx){
+  if(!roofPhotos[secId]||!roofPhotos[secId][idx])return;
+  roofPhotos[secId][idx].uploaded=true;
+  var sid=secId;
+  var card=document.getElementById('rpcard-'+sid+'-'+idx);if(card){card.classList.remove('unsaved');card.classList.add('uploaded');}
+  var ind=document.getElementById('rpind-'+sid+'-'+idx);if(ind){ind.classList.remove('red');ind.classList.add('green');}
+  var btn=document.getElementById('rpdl-'+sid+'-'+idx);if(btn){btn.className='photo-dl-btn done';btn.textContent='Uploaded';}
+  updatePhotoStatus();
+}
+
+function deleteRoofPhoto(secId,idx){
+  if(!roofPhotos[secId])return;
+  var doomed=roofPhotos[secId][idx];
+  if(doomed&&doomed.photoId)deletePhotoFromDB(doomed.photoId).catch(function(){});
+  roofPhotos[secId].splice(idx,1);
+  var sid=secId;
+  var grid=document.getElementById('rpgrid-'+sid);
+  if(grid){
+    grid.innerHTML='';
+    var none=document.createElement('div');none.className='no-photos-msg';none.id='rpnone-'+sid;
+    none.style.display=roofPhotos[secId].length?'none':'block';none.textContent='No photos yet';grid.appendChild(none);
+    roofPhotos[secId].forEach(function(p,i){renderRoofPhotoCard(secId,i,grid);});
+  }
+  updateRoofPhotoCount(secId);updatePhotoStatus();
+  var ssBtn=document.getElementById('rsecSave-'+sid);if(ssBtn)ssBtn.style.display=roofPhotos[secId].length?'block':'none';
+  autoSave();
+}
+
+function downloadSectionRoofPhotos(secId){
+  if(!roofPhotos[secId])return;
+  var delay=0;
+  roofPhotos[secId].forEach(function(p,i){if(!p.uploaded){setTimeout(function(){downloadRoofPhoto(secId,i);},delay);delay+=700;}});
+}
+
+function resetRoofPhotos(){
+  if(!confirm('Clear all roof-level photos?'))return;
+  ROOF_PHOTO_SECTIONS.forEach(function(sec){roofPhotos[sec.id]=[];});
+  buildRoofPhotoSections();updatePhotoStatus();
+}
+
 function scrollToUnsaved(){
   var found=false;
   facetList.forEach(function(f,fi){
@@ -1672,6 +1874,15 @@ function scrollToUnsaved(){
           found=true;
         }
       });
+    });
+  });
+  ROOF_PHOTO_SECTIONS.forEach(function(sec){
+    if(found)return;
+    (roofPhotos[sec.id]||[]).forEach(function(p,i){
+      if(!found&&!p.uploaded){
+        var card=document.getElementById('rpcard-'+sec.id+'-'+i);if(card)card.scrollIntoView({behavior:'smooth',block:'center'});
+        found=true;
+      }
     });
   });
 }
@@ -2251,7 +2462,11 @@ var CLIENT_ID = '253782351183-8pgd31f0ttse239isq7d0velvd5gcknb.apps.googleuserco
 var DRIVE_FOLDER_ID = '1OoAIRWoJw0WSaos3ieV-bUX96OR9NA5o';
 var SHEETS_URL = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vTh0tjaBLG5QzcExjVIUqyjBXBEb2hwe10fC82MmkQZvQ0xBCbPdnss9-IRMMalmwaj3o1YtEFiSwlB/pub?gid=0&single=true&output=csv';
 var NOTIFY_EMAIL = 'inspection@kosarekcc.com';
-var SAVE_KEY = 'kccFlatInsp_v2';
+// Schema bumped to v3 (July 22 2026) alongside PHOTO_DB_NAME: the per-facet
+// photo section set changed (added Roof Test Squares N/S/E/W Overview+Hail-Hits
+// buckets + Wind Damage + Other Damage). SAVE_KEY/PHOTO_DB_NAME bumped together
+// to keep localStorage + IndexedDB schemas locked in step.
+var SAVE_KEY = 'kccFlatInsp_v3';
 var __initComplete = false;  // Phase 2 H2 fix — autoSave gated until checkForRestore/restoreData/dismissRestore resolves.
 var SHEETS_REGISTRY_ID = '1cElx3edOb_3dNeLYy6f-mLiyi6zghsWoCGnPLLWr3Rc';
 
@@ -2268,7 +2483,7 @@ var systemScopes = {};
 SYS_IDS.forEach(function(sid) { systemChecked[sid] = false; systemScopes[sid] = 'reroof'; });
 
 var photoDB = null;
-var PHOTO_DB_NAME = 'kccFlatPhotoStore_v2';
+var PHOTO_DB_NAME = 'kccFlatPhotoStore_v3';
 var PHOTO_STORE_NAME = 'photos';
 var saveTimer = null;
 var inspectorList = [];
@@ -2570,7 +2785,9 @@ function getInspectionHash() {
     };
   }));
   var sysStr = JSON.stringify(systemChecked) + '|' + JSON.stringify(systemScopes);
-  var str = contactStr + structStr + facetStr + sysStr + insClaimVal + evVal;
+  // Roof-level photos — count per section so adding/removing a roof photo changes the hash.
+  var roofStr = ROOF_PHOTO_SECTIONS.map(function(sec){return (roofPhotos[sec.id]||[]).length;}).join(',');
+  var str = contactStr + structStr + facetStr + sysStr + roofStr + insClaimVal + evVal;
   var h = 0;
   for (var i = 0; i < str.length; i++) {
     var c = str.charCodeAt(i); h = ((h << 5) - h) + c; h = h & h;
@@ -2984,7 +3201,9 @@ function writeReqTypeCell(token, targetRow, callback) {
   }).then(function(){ callback(); }).catch(function(){ callback(); });
 }
 
-function writeToRegistry(token, folderLink, callback) {
+// masterFolderLink = the MASTER job folder link. NOT the inspection subfolder.
+// Passing the subfolder here is the July 16 2026 corruption bug — see alwaysWrite below.
+function writeToRegistry(token, masterFolderLink, callback) {
   var addr = v('f-address');
   if (!addr) { if (callback) callback(null); return; }
 
@@ -3010,12 +3229,30 @@ function writeToRegistry(token, folderLink, callback) {
 
     if (matchRow >= 0) {
       // Row found — update non-destructively (only write if field has value)
-      var updates = buildRegistryUpdates(matchRow, folderLink);
+      var updates = buildRegistryUpdates(matchRow, masterFolderLink);
       // Non-destructive: filter out fields that already have data
       // We re-read only the specific cells we'd overwrite to check
       // For simplicity: Status, Client, Phone, Email only write if cell is currently blank
-      // Ins Claim, Claim Number, Inspection Done, Drive Folder always write (inspection is authoritative)
-      var alwaysWrite = [22, 23, 47, 53]; // V, W, AU, BA
+      // Ins Claim, Claim Number, Inspection Done always write (inspection is authoritative)
+      //
+      // BA / col 53 (Drive Folder) is NOT in this list and must never be added back.
+      // July 16 2026 data-corruption bug: col 53 has two writers. docs@ writes the
+      // MASTER job folder (`2026 --- <street>, <city>, <state>`, the one holding
+      // EagleView/, Contracts/, Invoices/). This app used to write the per-inspection
+      // SUBFOLDER and force it through alwaysWrite, so any inspection submitted after
+      // docs@ created the row silently replaced the master URL with one inspection's
+      // photo folder. 15 of 31 live jobs were corrupted this way before it was caught
+      // (measured in roof-inspector, but this app shares the identical defect).
+      // Two halves to the fix, both required:
+      //   1. the caller now passes the MASTER folder link, never the inspection
+      //      subfolder, so the value written CARRIES THE SAME MEANING docs@ writes; and
+      //   2. col 53 falls through to the batchGet blankness filter below, so it is only
+      //      written when the cell is blank — matching the docs@ standing rule
+      //      "never overwrite an existing non-empty registry value".
+      // The app still SETS the folder on rows it creates (see createRegistryRow) and
+      // backfills blanks here — docs@ never backfills col 53 on an existing row, so
+      // "don't write at all" would leave inspector-created jobs permanently blank.
+      var alwaysWrite = [22, 23, 47]; // V, W, AU
       var conditionalUpdates = updates.filter(function(u) {
         var colNum = colLetterTo1based(u.range.replace('Job Registry!','').replace(/\d+/,''));
         return alwaysWrite.indexOf(colNum) >= 0;
@@ -3050,7 +3287,7 @@ function writeToRegistry(token, folderLink, callback) {
       }
     } else {
       // No match — create new row
-      createRegistryRow(token, rows, folderLink, function(err, jobId) {
+      createRegistryRow(token, rows, masterFolderLink, function(err, jobId) {
         if (err) { callback(err); return; }
         console.log('Registry: new row created ' + jobId);
         callback(null);
@@ -3060,7 +3297,11 @@ function writeToRegistry(token, folderLink, callback) {
   }).catch(function(e) { callback(e.message||String(e)); });
 }
 
-function createRegistryRow(token, rows, folderLink, callback) {
+// This app IS the row creator here — nothing else has written col 53 yet, so setting
+// it is correct and necessary (docs@ only ever sets col 53 on ITS OWN create path;
+// its update path never backfills, so a blank here would stay blank forever).
+// masterFolderLink must be the MASTER job folder, never the inspection subfolder.
+function createRegistryRow(token, rows, masterFolderLink, callback) {
   var addr = v('f-address');
   var csz = parseCSZ(v('f-citystatezip'));
   var billCsz = billingDiff ? parseCSZ(v('f-bill-csz')) : {city:'', state:'', zip:''};
@@ -3092,7 +3333,7 @@ function createRegistryRow(token, rows, folderLink, callback) {
   newRow[21] = insClaimVal === 'yes' ? 'Yes' : 'No';
   newRow[22] = insClaimVal === 'yes' ? v('f-claimnum') : '';
   newRow[46] = 'Yes';
-  newRow[52] = folderLink || '';
+  newRow[52] = masterFolderLink || '';  // BA = Drive Folder — MASTER job folder
   newRow[57] = today;
 
   // valueInputOption must be a query parameter for values.update, not in the body
@@ -3406,7 +3647,11 @@ function checkForRestore(){
   });
 }
 
-var STRUCT_SCOPE_IDS = ['f-reqtype','f-jobstatus','f-claimnum','f-notes'];
+// f-reqtype / f-jobstatus removed from the per-structure scope (July 22 2026):
+// classification is JOB-level and is now derived from the single f-category
+// picker via setCategory(). Keeping them here made the vestigial
+// loadStructFromDB overwrite the category-derived hidden fields on init/restore.
+var STRUCT_SCOPE_IDS = ['f-claimnum','f-notes'];
 var structureList = [];
 var activeStructIdx = 0;
 var submittedHash = null;
@@ -3421,7 +3666,10 @@ function makeDefaultStructure(typeVal, labelVal) {
           sysChecked: sysChecked, sysScopes: sysScopes, sysNotes: sysNotes};
 }
 
-function buildRegistryUpdates(targetRow, folderLink) {
+// masterFolderLink is the MASTER job folder (`2026 --- <street>, <city>, <state>`),
+// NOT the per-inspection subfolder. Col 53 is shared with docs@ and must hold one
+// meaning; see the alwaysWrite comment in writeToRegistry for the full history.
+function buildRegistryUpdates(targetRow, masterFolderLink) {
   var updates = [];
   var billCsz = billingDiff ? parseCSZ(v('f-bill-csz')) : {city:'', state:'', zip:''};
   function addUpdate(col1based, value) {
@@ -3451,13 +3699,14 @@ function buildRegistryUpdates(targetRow, folderLink) {
   var claimNum = v('f-claimnum');
   if (insClaimVal === 'yes' && claimNum) addUpdate(23, claimNum);
   addUpdate(47, 'Yes');
-  if (folderLink) addUpdate(53, folderLink);
+  if (masterFolderLink) addUpdate(53, masterFolderLink); // BA = Drive Folder (MASTER, blank-only — see alwaysWrite)
   return updates;
 }
 
 function buildEmailBody(addr, dateVal, inspector, folderLink, pdfLink) {
   var totalPhotos = 0;
   facetList.forEach(function(f){FACET_PHOTO_SECTIONS.forEach(function(s){totalPhotos+=(f.photos[s.id]||[]).length;});});
+  ROOF_PHOTO_SECTIONS.forEach(function(s){totalPhotos+=(roofPhotos[s.id]||[]).length;});
   var lines = [
     'KOSAREK CONSTRUCTION COMPANY',
     'FLAT ROOF USER INPUT INSPECTION',
@@ -3477,6 +3726,8 @@ function buildEmailBody(addr, dateVal, inspector, folderLink, pdfLink) {
   lines.push('');
   lines.push('PHOTOS: '+totalPhotos+' documented');
   facetList.forEach(function(f){FACET_PHOTO_SECTIONS.forEach(function(s){var c=(f.photos[s.id]||[]).length;if(c>0)lines.push('  ['+f.label+'] '+s.label+': '+c+' photo(s)');});});
+  // Roof-level photos — labeled roof-level (no facet bracket).
+  ROOF_PHOTO_SECTIONS.forEach(function(s){var c=(roofPhotos[s.id]||[]).length;if(c>0)lines.push('  '+s.label+': '+c+' photo(s)');});
   lines.push('');
   lines.push('=================================================='); lines.push('DRIVE LINKS'); lines.push('==================================================');
   lines.push('Inspection Folder: '+folderLink); lines.push('');
@@ -3546,6 +3797,11 @@ function runSubmit(token) {
     return;
   }
   setStepState('st-compress','active');
+  // The MASTER job folder id, hoisted to the submit closure so step6 can reach it.
+  // Before July 16 2026 the master id died inside step2 and only the INSPECTION folder
+  // id travelled down the chain — which is how the inspection subfolder ended up in the
+  // registry's Drive Folder column (BA/53), clobbering the master URL docs@ writes there.
+  var masterFolderId = null;
   function step2(){
     setStepState('st-folder','active');
     searchDriveFolder(masterFolderName, DRIVE_FOLDER_ID, token, function(err, files){
@@ -3554,6 +3810,9 @@ function runSubmit(token) {
       else { createDriveFolder(masterFolderName, DRIVE_FOLDER_ID, token, function(e2, mid){ if(e2||!mid){setStepState('st-folder','error');showDoneBtn();return;} step2b(mid); }); }
     });
     function step2b(parentId){
+      // parentId IS the master here (both branches above pass the master). Single
+      // funnel — capture it once so it cannot drift from what was actually used.
+      masterFolderId = parentId;
       findAvailableFolderName(inspFolderBase, parentId, token, function(availableName){
         createDriveFolder(availableName, parentId, token, function(err, inspId){
           if(err||!inspId){setStepState('st-folder','error');showDoneBtn();return;}
@@ -3565,11 +3824,57 @@ function runSubmit(token) {
   function step3(folderId){
     setStepState('st-photos','active');
     saveCurrentStructToDB();
+    // Upload the ROOF-LEVEL photos ONCE into the inspection folder (not per
+    // struct/facet). Mirrors the per-struct upload flow (section subfolders +
+    // per-photo blob upload + a PhotoReport HTML). Same hardening: each photo's
+    // markRoofPhotoUploaded fires only on its upload callback, so a failed
+    // photo stays flagged unsaved rather than being silently skipped. Runs
+    // inside the 'st-photos' step, before it is marked done.
+    function uploadRoofPhotos(inspFolderId, done){
+      var roofArr = [];
+      ROOF_PHOTO_SECTIONS.forEach(function(sec){
+        (roofPhotos[sec.id]||[]).forEach(function(p,i){ roofArr.push({dataURL:p.dataURL,caption:p.caption,label:p.label,sectionLabel:sec.label,secId:sec.id,idx:i,compressedURL:p.dataURL}); });
+      });
+      if(roofArr.length === 0){ done(); return; }
+      var roofPdfHTML = buildPhotoPDFHTML(roofArr, addr, dateVal, inspector);
+      createDriveFolder('Roof Test Squares & Damage', inspFolderId, token, function(err, roofFolderId){
+        var baseId = (!err && roofFolderId) ? roofFolderId : inspFolderId;
+        var sectionFolderMap = {};
+        var sectionsToCreate = [];
+        ROOF_PHOTO_SECTIONS.forEach(function(sec){ if((roofPhotos[sec.id]||[]).length > 0) sectionsToCreate.push(sec.label); });
+        function createSectionFolders(i){
+          if(i >= sectionsToCreate.length){ uploadPhotoNext(0); return; }
+          var secLabel = sectionsToCreate[i];
+          createDriveFolder(secLabel, baseId, token, function(e2, secFolderId){
+            sectionFolderMap[secLabel] = (!e2 && secFolderId) ? secFolderId : baseId;
+            createSectionFolders(i+1);
+          });
+        }
+        function uploadPhotoNext(pi){
+          if(pi >= roofArr.length){ uploadRoofFiles(); return; }
+          var p = roofArr[pi];
+          var b64 = p.compressedURL.split(',')[1];
+          var bytes = new Uint8Array(atob(b64).split('').map(function(c){ return c.charCodeAt(0); }));
+          var blob = new Blob([bytes], {type: 'image/jpeg'});
+          uploadBlobToDrive(p.label+'.jpg', blob, sectionFolderMap[p.sectionLabel]||baseId, token, function(){ markRoofPhotoUploaded(p.secId, p.idx); uploadPhotoNext(pi+1); });
+        }
+        function uploadRoofFiles(){
+          uploadFileToDrive('PhotoReport-'+slug+'-RoofLevel.html', roofPdfHTML, 'text/html', baseId, token, function(e3, data){
+            if(data && data.id) makeFilePublic(data.id, token);
+            done();
+          });
+        }
+        createSectionFolders(0);
+      });
+    }
     var structIdx = 0;
     function processNextStruct(){
       if(structIdx >= structureList.length){
-        setStepState('st-photos','done'); setStepState('st-excel','done'); setStepState('st-pdf','done');
-        step6(folderId,'https://drive.google.com/drive/folders/'+folderId); return;
+        uploadRoofPhotos(folderId, function(){
+          setStepState('st-photos','done'); setStepState('st-excel','done'); setStepState('st-pdf','done');
+          step6(folderId,'https://drive.google.com/drive/folders/'+folderId);
+        });
+        return;
       }
       var s = structureList[structIdx]; var structName = getStructName(s);
       var structSlug = structName.replace(/[^a-zA-Z0-9\-]/g,'-').substring(0,40);
@@ -3619,7 +3924,11 @@ function runSubmit(token) {
   }
   function step6(folderId, pdfLink){
     setStepState('st-email','active');
+    // folderLink = the INSPECTION subfolder. Correct for the EMAIL — that is where the
+    // inspector wants to land to see today's photos. It is NOT what the registry wants.
     var folderLink = 'https://drive.google.com/drive/folders/'+folderId;
+    // masterLink = the JOB folder. This is what the registry's Drive Folder column means.
+    var masterLink = masterFolderId ? 'https://drive.google.com/drive/folders/'+masterFolderId : null;
     var emailBody = buildEmailBody(addr,dateVal,inspector,folderLink,pdfLink);
     var sendTo = v('f-sendto')||NOTIFY_EMAIL;
     var inspectorEmail = v('f-inspector-email');
@@ -3628,7 +3937,7 @@ function runSubmit(token) {
     sendGmail(sendTo,emailSubject,emailBody,token,ccAddr,function(err){
       setStepState('st-email',err?'error':'done');
       setStepState('st-registry','active');
-      writeToRegistry(token, folderLink, function(regErr){
+      writeToRegistry(token, masterLink, function(regErr){
         if(regErr){ var el=document.getElementById('st-registry'); if(el){el.className='step-label error';el.textContent='Registry: '+String(regErr).substring(0,80);} }
         else { setStepState('st-registry','done'); }
         showDoneBtn();
@@ -3672,6 +3981,7 @@ function autoSave(){
       data._insClaimVal=insClaimVal;
       data._structures=stripDataURLsForSave(structureList);
       data._facetList=stripDataURLsForSave(facetList);
+      data._roofPhotos=stripDataURLsForSave(roofPhotos);  // roof-level photos (dataURLs live in IDB by photoId)
       data._activeFacetIdx=activeFacetIdx;
       data._evVal=evVal;
       data._activeStructIdx=activeStructIdx;
@@ -3720,6 +4030,17 @@ function restoreData(){
         if(data._evVal)setEV(data._evVal);
         renderFacetScope(); buildPhotoSections(); updatePhotoStatus();
       }
+      // Roof-level photos — restore the store shape, then hydrate dataURLs from
+      // the same IDB photoMap (roof entries share the photoId-keyed store).
+      if(data._roofPhotos){
+        ROOF_PHOTO_SECTIONS.forEach(function(sec){
+          roofPhotos[sec.id] = (data._roofPhotos[sec.id]||[]).map(function(entry){
+            if(entry.photoId && photoMap[entry.photoId]) entry.dataURL = photoMap[entry.photoId];
+            return entry;
+          });
+        });
+        buildRoofPhotoSections();
+      }
       if(data._structures&&data._structures.length){
         structureList=data._structures; activeStructIdx=data._activeStructIdx||0;
         loadStructFromDB(activeStructIdx); renderStructBar();
@@ -3731,13 +4052,17 @@ function restoreData(){
         });
       }
       if(data._inspIdx){setTimeout(function(){document.getElementById('f-inspector').value=data._inspIdx;onInspectorChange();},1200);}
+      // f-category is restored by the generic field loop above; re-derive the
+      // hidden f-reqtype / f-jobstatus from it (setCategory is a no-op autoSave
+      // while __initComplete is false, so it only populates the hidden fields).
+      setCategory();
     }catch(e){}
     updatePhotoStatus();
     __initComplete = true;  // Phase 2 H2 fix — restore complete; enable autoSave.
   });
 }
 
-var TRACK_IDS=['f-address','f-citystatezip','f-client','f-reqtype'];
+var TRACK_IDS=['f-address','f-citystatezip','f-client','f-category'];
 function updateProgress(){
   var filled=0;
   TRACK_IDS.forEach(function(id){var el=document.getElementById(id);if(el&&el.value.trim()&&el.value!=='0')filled++;});
@@ -3746,6 +4071,26 @@ function updateProgress(){
 
 function v(id){var el=document.getElementById(id);return el?el.value.trim():'';}
 
+// -- CATEGORY PICKER --
+// ONE visible picker (f-category) drives the TWO underlying registry columns
+// the gate machine reads: Request Type (f-reqtype) + Job Status (f-jobstatus).
+// The UI collapses; the submit still writes both, derived here:
+//   Inspect  -> Request Type=Inspect,  Job Status=E  (insurance HOLD: inspect
+//               only, NO EagleView until the claim is approved. The order-EV
+//               gate SKIPS Request Type=Inspect, so this holds quietly.)
+//   Estimate -> Request Type=Estimate, Job Status=E  (retail or approved
+//               claim — fires the order-EV gate.)
+//   Job      -> Request Type=Contract, Job Status=J  (contracted.)
+function setCategory(){
+  var cat=v('f-category');
+  var rt='', st='';
+  if(cat==='inspect'){ rt='Inspect'; st='E'; }
+  else if(cat==='estimate'){ rt='Estimate'; st='E'; }
+  else if(cat==='job'){ rt='Contract'; st='J'; }
+  var rtEl=document.getElementById('f-reqtype'); if(rtEl) rtEl.value=rt;
+  var stEl=document.getElementById('f-jobstatus'); if(stEl) stEl.value=st;
+  autoSave();
+}
 
 function copyForClaude(){
   var text=buildClaudeBlock();
@@ -3774,7 +4119,8 @@ function resetAll(){
   SYS_IDS.forEach(function(sid){if(systemChecked[sid]){systemChecked[sid]=true;toggleSystem(sid);}systemScopes[sid]='reroof';var el=document.getElementById('sysnotes-'+sid);if(el){el.value='';el.className='system-notes-input';}});
   updateGenScopeCount();
   facetList=[makeFacet('A')]; activeFacetIdx=0; activePhotoFacetIdx=0;
-  renderFacetScope(); buildPhotoSections(); updatePhotoStatus();
+  ROOF_PHOTO_SECTIONS.forEach(function(sec){roofPhotos[sec.id]=[];});
+  renderFacetScope(); buildPhotoSections(); buildRoofPhotoSections(); updatePhotoStatus();
   setBilling('yes'); setInsClaim('yes'); setEV('yes');
   document.getElementById('f-date').value=new Date().toISOString().split('T')[0];
   document.getElementById('f-sendto').value=NOTIFY_EMAIL;
@@ -3788,6 +4134,7 @@ renderStructBar();
 if(facetList.length===0){facetList.push(makeFacet('A'));activeFacetIdx=0;}
 renderFacetScope();
 buildPhotoSections();
+buildRoofPhotoSections();
 setInsClaim('yes');
 setEV('yes');
 loadInspectors();
@@ -3800,11 +4147,13 @@ loadGoogleGSI();
 window.addEventListener('beforeunload', function(e) {
   var unsaved = 0;
   facetList.forEach(function(f){ FACET_PHOTO_SECTIONS.forEach(function(sec){ (f.photos[sec.id]||[]).forEach(function(p){ if(!p.uploaded)unsaved++; }); }); });
+  ROOF_PHOTO_SECTIONS.forEach(function(sec){ (roofPhotos[sec.id]||[]).forEach(function(p){ if(!p.uploaded)unsaved++; }); });
   if (unsaved > 0) { e.preventDefault(); e.returnValue = ''; }
 });
 window.addEventListener('pagehide', function() {
   var unsaved = 0;
   facetList.forEach(function(f){ FACET_PHOTO_SECTIONS.forEach(function(sec){ (f.photos[sec.id]||[]).forEach(function(p){ if(!p.uploaded)unsaved++; }); }); });
+  ROOF_PHOTO_SECTIONS.forEach(function(sec){ (roofPhotos[sec.id]||[]).forEach(function(p){ if(!p.uploaded)unsaved++; }); });
   if (unsaved > 0) {
     var bar = document.getElementById('saveBar');
     if (bar) { bar.textContent = unsaved + ' photos not saved!'; bar.className = 'autosave-bar'; bar.style.color = '#ff5c5c'; }

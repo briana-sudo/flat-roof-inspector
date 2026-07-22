@@ -2874,13 +2874,18 @@ function getLocation() {
   if (!navigator.geolocation) { status.textContent = 'GPS not supported'; status.className='loc-status err'; return; }
   navigator.geolocation.getCurrentPosition(
     function(pos) {
+      // Remember the device coords so the Photon address autocomplete can bias to them.
+      window.__kccLastCoords = {lat:pos.coords.latitude, lon:pos.coords.longitude};
       status.textContent = 'Looking up address...';
       fetch('https://nominatim.openstreetmap.org/reverse?format=json&lat='+pos.coords.latitude+'&lon='+pos.coords.longitude)
         .then(function(r){return r.json();})
         .then(function(data){
           var a = data.address||{};
+          var gpsCity = a.city||a.town||a.village||a.county||'';
+          var gpsState = stateToAbbrev(a.state||'');  // Nominatim returns full name; store 'MO' not 'Missouri'
+          var gpsZip = a.postcode||'';
           document.getElementById('f-address').value = [a.house_number,a.road].filter(Boolean).join(' ');
-          document.getElementById('f-citystatezip').value = [a.city||a.town||a.village||a.county,a.state,a.postcode].filter(Boolean).join(', ');
+          document.getElementById('f-citystatezip').value = gpsCity + (gpsState ? ', '+gpsState : '') + (gpsZip ? ' '+gpsZip : '');
           status.textContent = 'Address filled from GPS'; status.className='loc-status ok'; autoSave();
         }).catch(function(){status.textContent='Address lookup failed';status.className='loc-status err';});
     },
@@ -3032,6 +3037,20 @@ var US_STATE_NAMES = {
   'district of columbia':'DC'
 };
 var US_STATE_ABBREVS = Object.keys(US_STATE_NAMES).map(function(k){return US_STATE_NAMES[k];});
+var US_STATE_ABBREV_SET = {};
+US_STATE_ABBREVS.forEach(function(a){ US_STATE_ABBREV_SET[a] = true; });
+// Normalize a state token to its 2-letter abbreviation. Accepts a full name
+// ('Missouri'), an already-correct abbreviation ('MO'), or returns the input
+// unchanged if unrecognized (never silently destroys an odd manual value).
+// The registry write depends on a 2-letter state — Nominatim GPS returns the
+// full name, so the GPS autofill runs this before storing City, State, ZIP.
+function stateToAbbrev(s) {
+  s = (s||'').trim();
+  if (!s) return '';
+  if (US_STATE_NAMES[s.toLowerCase()]) return US_STATE_NAMES[s.toLowerCase()];
+  if (s.length === 2 && US_STATE_ABBREV_SET[s.toUpperCase()]) return s.toUpperCase();
+  return s;
+}
 
 function parseCSZ(input) {
   if (!input || typeof input !== 'string') return {city:'', state:'', zip:''};
@@ -4127,6 +4146,74 @@ function resetAll(){
   updateProgress();
 }
 
+// -- ADDRESS AUTOCOMPLETE (Photon / OpenStreetMap, keyless — same approach dewy + tempest use) --
+// Typeahead on the street-address field. On pick, fills the street field and the combined
+// "City, ST ZIP" field with the state ABBREVIATED, so the registry write is correct at the
+// source. GPS + parseCSZ remain fallbacks for manual entry.
+(function(){
+  var ABBR={'alabama':'AL','alaska':'AK','arizona':'AZ','arkansas':'AR','california':'CA','colorado':'CO','connecticut':'CT','delaware':'DE','florida':'FL','georgia':'GA','hawaii':'HI','idaho':'ID','illinois':'IL','indiana':'IN','iowa':'IA','kansas':'KS','kentucky':'KY','louisiana':'LA','maine':'ME','maryland':'MD','massachusetts':'MA','michigan':'MI','minnesota':'MN','mississippi':'MS','missouri':'MO','montana':'MT','nebraska':'NE','nevada':'NV','new hampshire':'NH','new jersey':'NJ','new mexico':'NM','new york':'NY','north carolina':'NC','north dakota':'ND','ohio':'OH','oklahoma':'OK','oregon':'OR','pennsylvania':'PA','rhode island':'RI','south carolina':'SC','south dakota':'SD','tennessee':'TN','texas':'TX','utah':'UT','vermont':'VT','virginia':'VA','washington':'WA','west virginia':'WV','wisconsin':'WI','wyoming':'WY','district of columbia':'DC'};
+  function abbr(s){ s=(s||'').trim(); if(!s) return ''; if(ABBR[s.toLowerCase()]) return ABBR[s.toLowerCase()]; return s; }
+  // KCC service-area center (metro-east St. Louis / St. Clair County IL, Belleville/Swansea).
+  // Used to bias Photon predictions toward the service area when no device GPS is available.
+  var KCC_CENTER={lat:38.6664, lon:-90.4399};
+  // Extract a leading house number (digits, optional single unit letter: '1816' or '1816B')
+  // from the string the user typed. Used to preserve a house number when a street-level
+  // Photon suggestion carries none.
+  function leadingHouseNumber(s){ var m=(s||'').trim().match(/^(\d+[A-Za-z]?)\b/); return m?m[1]:''; }
+  var cssDone=false;
+  function injectCSS(){ if(cssDone) return; cssDone=true; var st=document.createElement('style'); st.textContent='.addr-ac{position:relative}.addr-ac-list{position:absolute;left:0;right:0;top:100%;z-index:60;background:#fff;border:1px solid #bbb;border-top:none;border-radius:0 0 8px 8px;max-height:240px;overflow:auto;box-shadow:0 8px 20px rgba(0,0,0,.18)}.addr-ac-item{display:block;width:100%;text-align:left;padding:10px 12px;font-size:13px;line-height:1.3;border:none;border-bottom:1px solid #eee;background:#fff;cursor:pointer;color:#222}.addr-ac-item:last-child{border-bottom:none}.addr-ac-item:active,.addr-ac-item:hover{background:#eef3ff}'; document.head.appendChild(st); }
+  window.attachAddrAutocomplete=function(streetId, cszId, onPick){
+    var inp=document.getElementById(streetId); if(!inp||inp.dataset.acWired) return; inp.dataset.acWired='1';
+    injectCSS();
+    var wrap=document.createElement('div'); wrap.className='addr-ac';
+    inp.parentNode.insertBefore(wrap, inp); wrap.appendChild(inp);
+    var list=document.createElement('div'); list.className='addr-ac-list'; list.style.display='none'; wrap.appendChild(list);
+    var t=null;
+    function close(){ list.style.display='none'; list.innerHTML=''; }
+    inp.addEventListener('input', function(){
+      var q=inp.value.trim(); clearTimeout(t);
+      if(q.length<4){ close(); return; }
+      t=setTimeout(function(){
+        // Bias predictions toward the device's GPS coords if the app has captured any,
+        // else toward the KCC service-area center.
+        var bias=(window.__kccLastCoords&&window.__kccLastCoords.lat!=null)?window.__kccLastCoords:KCC_CENTER;
+        fetch('https://photon.komoot.io/api/?limit=6&lang=en&lat='+bias.lat+'&lon='+bias.lon+'&q='+encodeURIComponent(q))
+          .then(function(r){ return r.json(); })
+          .then(function(j){
+            var feats=((j&&j.features)||[]).map(function(f){
+              var p=f.properties||{};
+              var hn=p.housenumber||'';
+              var streetName=(p.street||p.name||'');
+              var street=[hn,streetName].filter(Boolean).join(' ')||p.name||'';
+              var city=p.city||p.town||p.village||p.hamlet||p.county||'';
+              return {street:street, streetName:streetName, hn:hn, city:city, st:abbr(p.state||''), zip:p.postcode||''};
+            }).filter(function(x){ return x.street&&x.city; });
+            list.innerHTML='';
+            if(!feats.length){ close(); return; }
+            feats.forEach(function(loc){
+              var b=document.createElement('button'); b.type='button'; b.className='addr-ac-item';
+              b.textContent=[loc.street, loc.city, loc.st, loc.zip].filter(Boolean).join(', ');
+              b.addEventListener('click', function(){
+                var chosen=loc;
+                // BUG-1 fix: a street-level Photon pick carries no house number. If the user
+                // already typed one (e.g. '1816 North 17th Street'), preserve it — never let
+                // the pick erase it. If the feature HAS a housenumber it is authoritative.
+                if(!loc.hn && loc.streetName){
+                  var typed=leadingHouseNumber(inp.value);
+                  if(typed){ chosen={street:typed+' '+loc.streetName, streetName:loc.streetName, hn:typed, city:loc.city, st:loc.st, zip:loc.zip}; }
+                }
+                try{ onPick(chosen); }catch(e){} close();
+              });
+              list.appendChild(b);
+            });
+            list.style.display='block';
+          }).catch(function(){ close(); });
+      }, 350);
+    });
+    document.addEventListener('click', function(e){ if(!wrap.contains(e.target)) close(); });
+  };
+})();
+
 // -- INIT --
 document.getElementById('f-date').value=new Date().toISOString().split('T')[0];
 if(structureList.length===0){structureList.push(makeDefaultStructure('Dwelling',''));activeStructIdx=0;}
@@ -4138,6 +4225,12 @@ buildRoofPhotoSections();
 setInsClaim('yes');
 setEV('yes');
 loadInspectors();
+attachAddrAutocomplete('f-address','f-citystatezip', function(loc){
+  var a=document.getElementById('f-address'); if(a) a.value=loc.street;
+  var c=document.getElementById('f-citystatezip'); if(c) c.value=loc.city+(loc.st?', '+loc.st:'')+(loc.zip?' '+loc.zip:'');
+  submittedHash=null; try{localStorage.removeItem('kcc_submitted_hash');}catch(e){}
+  if(typeof autoSave==='function') autoSave();
+});
 checkForRestore();
 checkAuth();
 updateProgress();

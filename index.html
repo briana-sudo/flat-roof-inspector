@@ -4146,10 +4146,14 @@ function resetAll(){
   updateProgress();
 }
 
-// -- ADDRESS AUTOCOMPLETE (Photon / OpenStreetMap, keyless — same approach dewy + tempest use) --
-// Typeahead on the street-address field. On pick, fills the street field and the combined
-// "City, ST ZIP" field with the state ABBREVIATED, so the registry write is correct at the
-// source. GPS + parseCSZ remain fallbacks for manual entry.
+// -- ADDRESS AUTOCOMPLETE (Google Places New, via the shared KCC proxy; Photon fallback) --
+// PRIMARY: TEMPEST's Google Places (New) Autocomplete proxy `/api/spend-autocomplete` — the Google
+// key stays server-side on KCCStormAPI (rule 9: this page holds no credential). Metro-bounded to the
+// KCC/STL service area. Descriptions come back as "Street, City, ST" (state already 2-letter; NOTE
+// Google autocomplete does NOT return ZIP — the ZIP slot is left blank for GPS/parseCSZ/manual to fill).
+// FALLBACK: keyless Photon/OpenStreetMap when the proxy is unreachable or returns nothing (also covers
+// an address outside the metro geofence) — Photon DOES carry a ZIP. On pick, fills the street field and
+// the combined "City, ST ZIP" field. GPS + parseCSZ remain fallbacks for manual entry.
 (function(){
   var ABBR={'alabama':'AL','alaska':'AK','arizona':'AZ','arkansas':'AR','california':'CA','colorado':'CO','connecticut':'CT','delaware':'DE','florida':'FL','georgia':'GA','hawaii':'HI','idaho':'ID','illinois':'IL','indiana':'IN','iowa':'IA','kansas':'KS','kentucky':'KY','louisiana':'LA','maine':'ME','maryland':'MD','massachusetts':'MA','michigan':'MI','minnesota':'MN','mississippi':'MS','missouri':'MO','montana':'MT','nebraska':'NE','nevada':'NV','new hampshire':'NH','new jersey':'NJ','new mexico':'NM','new york':'NY','north carolina':'NC','north dakota':'ND','ohio':'OH','oklahoma':'OK','oregon':'OR','pennsylvania':'PA','rhode island':'RI','south carolina':'SC','south dakota':'SD','tennessee':'TN','texas':'TX','utah':'UT','vermont':'VT','virginia':'VA','washington':'WA','west virginia':'WV','wisconsin':'WI','wyoming':'WY','district of columbia':'DC'};
   function abbr(s){ s=(s||'').trim(); if(!s) return ''; if(ABBR[s.toLowerCase()]) return ABBR[s.toLowerCase()]; return s; }
@@ -4162,6 +4166,23 @@ function resetAll(){
   function leadingHouseNumber(s){ var m=(s||'').trim().match(/^(\d+[A-Za-z]?)\b/); return m?m[1]:''; }
   var cssDone=false;
   function injectCSS(){ if(cssDone) return; cssDone=true; var st=document.createElement('style'); st.textContent='.addr-ac{position:relative}.addr-ac-list{position:absolute;left:0;right:0;top:100%;z-index:60;background:#fff;border:1px solid #bbb;border-top:none;border-radius:0 0 8px 8px;max-height:240px;overflow:auto;box-shadow:0 8px 20px rgba(0,0,0,.18)}.addr-ac-item{display:block;width:100%;text-align:left;padding:10px 12px;font-size:13px;line-height:1.3;border:none;border-bottom:1px solid #eee;background:#fff;cursor:pointer;color:#222}.addr-ac-item:last-child{border-bottom:none}.addr-ac-item:active,.addr-ac-item:hover{background:#eef3ff}'; document.head.appendChild(st); }
+  // The shared KCC Places proxy (TEMPEST's, Google key server-side). Returns
+  // {status, suggestions:[{description:"Street, City, ST", place_id}], session_token}.
+  var AC_PROXY='https://kcc-proxy.netlify.app/api/spend-autocomplete';
+  var acSession=null; // Places billing session token, threaded across keystrokes, reset on pick.
+  // Parse a Google Places New description "Street, City, ST" into the app's structured shape.
+  // Google autocomplete returns NO ZIP, so zip is '' (GPS/parseCSZ/manual fill it). Sets streetName
+  // and hn so the BUG-1 typed-house-number preservation still works on a Google pick.
+  function parseGoogleDesc(desc){
+    var parts=(desc||'').split(',').map(function(s){return s.trim();}).filter(Boolean);
+    if(parts.length<3) return null;                       // need at least Street, City, ST
+    var st=abbr(parts[parts.length-1]);                   // already 2-letter, abbr() is a no-op safety
+    var city=parts[parts.length-2];
+    var street=parts.slice(0, parts.length-2).join(', ');
+    var hn=leadingHouseNumber(street);
+    var streetName=hn?street.replace(/^\d+[A-Za-z]?\s*/,''):street;
+    return {street:street, streetName:streetName, hn:hn, city:city, st:st, zip:''};
+  }
   window.attachAddrAutocomplete=function(streetId, cszId, onPick){
     var inp=document.getElementById(streetId); if(!inp||inp.dataset.acWired) return; inp.dataset.acWired='1';
     injectCSS();
@@ -4170,44 +4191,62 @@ function resetAll(){
     var list=document.createElement('div'); list.className='addr-ac-list'; list.style.display='none'; wrap.appendChild(list);
     var t=null;
     function close(){ list.style.display='none'; list.innerHTML=''; }
+    function renderList(feats){
+      list.innerHTML='';
+      if(!feats.length){ close(); return; }
+      feats.forEach(function(loc){
+        var b=document.createElement('button'); b.type='button'; b.className='addr-ac-item';
+        b.textContent=[loc.street, loc.city, loc.st, loc.zip].filter(Boolean).join(', ');
+        b.addEventListener('click', function(){
+          var chosen=loc;
+          // BUG-1 fix: a street-level pick may carry no house number. If the user already typed one
+          // (e.g. '1816 North 17th Street'), preserve it — never let the pick erase it. A pick that
+          // HAS a house number is authoritative.
+          if(!loc.hn && loc.streetName){
+            var typed=leadingHouseNumber(inp.value);
+            if(typed){ chosen={street:typed+' '+loc.streetName, streetName:loc.streetName, hn:typed, city:loc.city, st:loc.st, zip:loc.zip}; }
+          }
+          acSession=null;                                 // a pick ends the Places billing session
+          try{ onPick(chosen); }catch(e){} close();
+        });
+        list.appendChild(b);
+      });
+      list.style.display='block';
+    }
+    // PRIMARY: Google Places (New) via the shared proxy. On empty/error, `fail()` is called.
+    function googleSearch(q, ok, fail){
+      var body={input:q}; if(acSession) body.session_token=acSession;
+      fetch(AC_PROXY, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)})
+        .then(function(r){ return r.json(); })
+        .then(function(j){
+          if(j&&j.session_token) acSession=j.session_token;
+          var feats=(((j&&j.suggestions)||[]).map(function(s){ return parseGoogleDesc(s.description); }))
+            .filter(function(x){ return x&&x.street&&x.city; });
+          if(feats.length){ ok(feats); } else { fail(); }
+        }).catch(function(){ fail(); });
+    }
+    // FALLBACK: keyless Photon (carries a ZIP), biased to device GPS or the KCC service-area center.
+    function photonSearch(q, ok){
+      var bias=(window.__kccLastCoords&&window.__kccLastCoords.lat!=null)?window.__kccLastCoords:KCC_CENTER;
+      fetch('https://photon.komoot.io/api/?limit=6&lang=en&lat='+bias.lat+'&lon='+bias.lon+'&q='+encodeURIComponent(q))
+        .then(function(r){ return r.json(); })
+        .then(function(j){
+          var feats=((j&&j.features)||[]).map(function(f){
+            var p=f.properties||{};
+            var hn=p.housenumber||'';
+            var streetName=(p.street||p.name||'');
+            var street=[hn,streetName].filter(Boolean).join(' ')||p.name||'';
+            var city=p.city||p.town||p.village||p.hamlet||p.county||'';
+            return {street:street, streetName:streetName, hn:hn, city:city, st:abbr(p.state||''), zip:p.postcode||''};
+          }).filter(function(x){ return x.street&&x.city; });
+          ok(feats);
+        }).catch(function(){ ok([]); });
+    }
     inp.addEventListener('input', function(){
       var q=inp.value.trim(); clearTimeout(t);
       if(q.length<4){ close(); return; }
       t=setTimeout(function(){
-        // Bias predictions toward the device's GPS coords if the app has captured any,
-        // else toward the KCC service-area center.
-        var bias=(window.__kccLastCoords&&window.__kccLastCoords.lat!=null)?window.__kccLastCoords:KCC_CENTER;
-        fetch('https://photon.komoot.io/api/?limit=6&lang=en&lat='+bias.lat+'&lon='+bias.lon+'&q='+encodeURIComponent(q))
-          .then(function(r){ return r.json(); })
-          .then(function(j){
-            var feats=((j&&j.features)||[]).map(function(f){
-              var p=f.properties||{};
-              var hn=p.housenumber||'';
-              var streetName=(p.street||p.name||'');
-              var street=[hn,streetName].filter(Boolean).join(' ')||p.name||'';
-              var city=p.city||p.town||p.village||p.hamlet||p.county||'';
-              return {street:street, streetName:streetName, hn:hn, city:city, st:abbr(p.state||''), zip:p.postcode||''};
-            }).filter(function(x){ return x.street&&x.city; });
-            list.innerHTML='';
-            if(!feats.length){ close(); return; }
-            feats.forEach(function(loc){
-              var b=document.createElement('button'); b.type='button'; b.className='addr-ac-item';
-              b.textContent=[loc.street, loc.city, loc.st, loc.zip].filter(Boolean).join(', ');
-              b.addEventListener('click', function(){
-                var chosen=loc;
-                // BUG-1 fix: a street-level Photon pick carries no house number. If the user
-                // already typed one (e.g. '1816 North 17th Street'), preserve it — never let
-                // the pick erase it. If the feature HAS a housenumber it is authoritative.
-                if(!loc.hn && loc.streetName){
-                  var typed=leadingHouseNumber(inp.value);
-                  if(typed){ chosen={street:typed+' '+loc.streetName, streetName:loc.streetName, hn:typed, city:loc.city, st:loc.st, zip:loc.zip}; }
-                }
-                try{ onPick(chosen); }catch(e){} close();
-              });
-              list.appendChild(b);
-            });
-            list.style.display='block';
-          }).catch(function(){ close(); });
+        googleSearch(q, renderList, function(){ photonSearch(q, function(feats){ renderList(feats); }); });
       }, 350);
     });
     document.addEventListener('click', function(e){ if(!wrap.contains(e.target)) close(); });

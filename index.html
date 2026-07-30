@@ -3468,6 +3468,7 @@ function startCodeAuth(done) {
     client_id: CLIENT_ID,
     scope: AUTH_SCOPES,
     ux_mode: 'popup',
+    access_type: 'offline',   // ask Google for a refresh token on the server-side exchange
     callback: function(resp) {
       if (resp.error) { done && done(resp.error); return; }
       if (!resp.code) { done && done('no_code'); return; }

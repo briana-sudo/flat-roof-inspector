@@ -2489,6 +2489,12 @@ var saveTimer = null;
 var inspectorList = [];
 var accessToken = null;
 var tokenExpiry = 0;
+// Durable Drive sign-in (2026-07-30): the tech authorizes ONCE and stays connected.
+// Server-held refresh token in netlify-proxy/functions/drive-session.js. Scopes now
+// include openid+email so the code-flow exchange returns an id_token the proxy verifies.
+var AUTH_SCOPES = 'openid email https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/gmail.send https://www.googleapis.com/auth/spreadsheets';
+var DRIVE_SESSION_API = 'https://kcc-proxy.netlify.app/api/drive-session';
+var refreshTimer = null;
 
 // ============================================================
 // IDB photo store — Promise-based shape (Phase 2 H1 fix, May 12 2026)
@@ -3401,23 +3407,33 @@ function colLetterTo1based(col) {
 function loadGoogleGSI() {
   var script = document.createElement('script');
   script.src = 'https://accounts.google.com/gsi/client';
-  script.onload = function() { if (!checkAuth()) setTimeout(function(){document.getElementById('signinOverlay').classList.add('show');},1500); };
+  script.onload = function() {
+    // Already have a durable 30-day session? Show connected immediately and mint a fresh
+    // access token silently in the background — no popup, no re-consent.
+    if (localStorage.getItem('kcc_drive_session')) {
+      updateAuthBar(true);
+      refreshFromSession(function(){});
+    } else if (!checkAuth()) {
+      setTimeout(function(){document.getElementById('signinOverlay').classList.add('show');},1500);
+    }
+  };
   script.onerror = function() { var el=document.getElementById('authBar'); if(el){el.textContent='Drive unavailable';} };
   document.body.appendChild(script);
 }
 
+// A durable session (or a still-fresh cached access token) means "connected". The old
+// flow force-cleared any token whose scope-ver != v2; we no longer force a logout — an
+// expired cached token is simply re-minted silently (session path) or on next sign-in.
 function checkAuth() {
   var saved = localStorage.getItem('kcc_token');
   var expiry = parseInt(localStorage.getItem('kcc_token_expiry')||'0');
   var scopeVer = localStorage.getItem('kcc_scope_ver');
-  // v2 = includes spreadsheets scope. If stored token is older, force re-auth.
-  if (saved && Date.now() < expiry - 60000 && scopeVer === 'v2') {
-    accessToken=saved; tokenExpiry=expiry; updateAuthBar(true); return true;
+  if (localStorage.getItem('kcc_drive_session')) {
+    if (saved && Date.now() < expiry - 60000) { accessToken=saved; tokenExpiry=expiry; }
+    updateAuthBar(true); return true;
   }
-  // Clear stale token so user gets re-auth prompt
-  if (scopeVer !== 'v2') {
-    localStorage.removeItem('kcc_token');
-    localStorage.removeItem('kcc_token_expiry');
+  if (saved && Date.now() < expiry - 60000 && (scopeVer==='v2' || scopeVer==='v3')) {
+    accessToken=saved; tokenExpiry=expiry; updateAuthBar(true); return true;
   }
   return false;
 }
@@ -3430,41 +3446,170 @@ function updateAuthBar(ok) {
   else{el.textContent='tap to sign in';el.className='auth-status';}
 }
 
+// ── DURABLE SIGN-IN (2026-07-30) ─────────────────────────────────────────────────────
+// PRIMARY path: OAuth *code flow*. One consent, then the proxy holds a refresh token
+// server-side and the phone keeps a 30-day KCC session. If the proxy reports the durable
+// path isn't configured yet (KCC_OAUTH_CLIENT_SECRET unset), fall back to the interim
+// token flow so the tech can still connect (it may still drop hourly on iOS PWA).
 function signInGoogle() {
   if (typeof google==='undefined'||!google.accounts){alert('Google Sign In not loaded. Check connection.');return;}
+  startCodeAuth(function(err){
+    if (!err) return;
+    // User dismissed the Google popup — do not chain another popup at them.
+    if (err==='popup_closed'||err==='access_denied'||err==='popup_failed_to_open'||err==='user_cancel') return;
+    // Any other failure (durable path not configured, no refresh token, server/transport
+    // error) — connect via the interim token flow so the tech is never blocked.
+    tokenSignIn(true);
+  });
+}
+
+function startCodeAuth(done) {
+  var codeClient = google.accounts.oauth2.initCodeClient({
+    client_id: CLIENT_ID,
+    scope: AUTH_SCOPES,
+    ux_mode: 'popup',
+    callback: function(resp) {
+      if (resp.error) { done && done(resp.error); return; }
+      if (!resp.code) { done && done('no_code'); return; }
+      // Hand the one-time code to the proxy for the durable exchange (refresh token held
+      // server-side; the browser never sees it).
+      fetch(DRIVE_SESSION_API, {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ action:'exchange', code: resp.code, redirect_uri:'postmessage' })
+      }).then(function(r){ return r.json().then(function(j){ return {status:r.status, j:j}; }); })
+      .then(function(o){
+        if (o.status===503 && o.j && o.j.error==='not_configured') { done && done('not_configured'); return; }
+        if (!o.j || !o.j.ok) { done && done((o.j&&(o.j.detail||o.j.error))||'exchange_failed'); return; }
+        applyDurableSession(o.j);
+        done && done(null);
+      }).catch(function(e){ done && done(e.message||String(e)); });
+    }
+  });
+  codeClient.requestCode();
+}
+
+function applyDurableSession(j) {
+  accessToken = j.access_token;
+  tokenExpiry = j.expiresAt || (Date.now()+3600000);
+  localStorage.setItem('kcc_token', accessToken);
+  localStorage.setItem('kcc_token_expiry', String(tokenExpiry));
+  localStorage.setItem('kcc_scope_ver', 'v3');
+  if (j.session) localStorage.setItem('kcc_drive_session', j.session);
+  var ov = document.getElementById('signinOverlay'); if (ov) ov.classList.remove('show');
+  updateAuthBar(true);
+  scheduleProactiveRefresh();
+}
+
+// Silent server refresh: present the 30-day session, get a fresh access token. No popup.
+// This is the iOS-PWA-proof path — it does not depend on GIS cookies/storage surviving.
+function refreshFromSession(cb) {
+  var session = localStorage.getItem('kcc_drive_session');
+  if (!session) { cb && cb('no_session'); return; }
+  fetch(DRIVE_SESSION_API, {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ action:'refresh', session: session })
+  }).then(function(r){ return r.json().then(function(j){ return {status:r.status, j:j}; }); })
+  .then(function(o){
+    if (o.j && o.j.ok) {
+      accessToken = o.j.access_token;
+      tokenExpiry = o.j.expiresAt || (Date.now()+3600000);
+      localStorage.setItem('kcc_token', accessToken);
+      localStorage.setItem('kcc_token_expiry', String(tokenExpiry));
+      updateAuthBar(true);
+      scheduleProactiveRefresh();
+      cb && cb(null, accessToken);
+      return;
+    }
+    // Session expired / grant revoked -> durable state is dead; a fresh consent is needed.
+    var dead = o.status===401 || (o.j && (o.j.error==='session_expired'||o.j.error==='grant_revoked'||o.j.error==='no_stored_grant'||o.j.error==='bad_session'||o.j.error==='wrong_token_kind'));
+    if (dead) { localStorage.removeItem('kcc_drive_session'); }
+    cb && cb((o.j&&(o.j.detail||o.j.error))||'refresh_failed');
+  }).catch(function(e){ cb && cb(e.message||String(e)); });
+}
+
+// Keep the access token warm: refresh ~5 min before it expires. In durable mode this is a
+// silent server call; in interim (token-flow) mode it is the GIS silent path (prompt:'').
+function scheduleProactiveRefresh() {
+  if (refreshTimer) clearTimeout(refreshTimer);
+  var wait = Math.max(30000, (tokenExpiry - Date.now()) - 5*60*1000);
+  refreshTimer = setTimeout(function(){
+    if (localStorage.getItem('kcc_drive_session')) refreshFromSession(function(){});
+    else tokenSilentRefresh();
+  }, wait);
+}
+
+// INTERIM/fallback token flow (no server refresh token). interactive=false uses the GIS
+// SILENT path so it re-connects without a popup where the browser allows it. On an iOS
+// installed PWA the silent path may not complete — that is exactly why the durable code
+// flow above exists.
+function tokenSignIn(interactive) {
+  if (typeof google==='undefined'||!google.accounts){ if(interactive) alert('Google Sign In not loaded.'); return; }
   var client = google.accounts.oauth2.initTokenClient({
     client_id: CLIENT_ID,
-    scope: 'https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/gmail.send https://www.googleapis.com/auth/spreadsheets',
+    scope: AUTH_SCOPES,
     callback: function(response) {
-      if (response.error){alert('Sign in failed: '+response.error);return;}
+      if (response.error){ if(interactive) alert('Sign in failed: '+response.error); return; }
       accessToken=response.access_token;
       tokenExpiry=Date.now()+(response.expires_in*1000);
       localStorage.setItem('kcc_token',accessToken);
       localStorage.setItem('kcc_token_expiry',String(tokenExpiry));
       localStorage.setItem('kcc_scope_ver','v2');
-      document.getElementById('signinOverlay').classList.remove('show');
+      var ov=document.getElementById('signinOverlay'); if(ov) ov.classList.remove('show');
       updateAuthBar(true);
+      scheduleProactiveRefresh();
     }
   });
-  client.requestAccessToken();
+  client.requestAccessToken(interactive ? {} : {prompt:''});
+}
+
+function tokenSilentRefresh() {
+  if (typeof google==='undefined'||!google.accounts) return;
+  var client = google.accounts.oauth2.initTokenClient({
+    client_id: CLIENT_ID,
+    scope: AUTH_SCOPES,
+    callback: function(response){
+      if (response.error || !response.access_token) return; // silent path may no-op on iOS PWA
+      accessToken=response.access_token;
+      tokenExpiry=Date.now()+(response.expires_in*1000);
+      localStorage.setItem('kcc_token',accessToken);
+      localStorage.setItem('kcc_token_expiry',String(tokenExpiry));
+      updateAuthBar(true);
+      scheduleProactiveRefresh();
+    }
+  });
+  client.requestAccessToken({prompt:''});
 }
 
 function skipSignIn() { document.getElementById('signinOverlay').classList.remove('show'); }
 
+// The submit-pipeline choke point. Non-interactive whenever possible so a submit never
+// blocks on a popup: cached token -> silent server refresh (durable) -> token flow.
 function ensureAuth(callback) {
   if (accessToken && Date.now()<tokenExpiry-60000){callback(null,accessToken);return;}
+  if (localStorage.getItem('kcc_drive_session')) {
+    refreshFromSession(function(err, tok){
+      if (!err && tok){ callback(null, tok); return; }
+      ensureAuthTokenFlow(callback);
+    });
+    return;
+  }
+  ensureAuthTokenFlow(callback);
+}
+
+function ensureAuthTokenFlow(callback) {
   if (typeof google==='undefined'||!google.accounts){callback('Google not loaded');return;}
   var client = google.accounts.oauth2.initTokenClient({
     client_id: CLIENT_ID,
-    scope: 'https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/gmail.send https://www.googleapis.com/auth/spreadsheets',
+    scope: AUTH_SCOPES,
     callback: function(response) {
       if (response.error){callback(response.error);return;}
       accessToken=response.access_token;
       tokenExpiry=Date.now()+(response.expires_in*1000);
       localStorage.setItem('kcc_token',accessToken);
       localStorage.setItem('kcc_token_expiry',String(tokenExpiry));
-      localStorage.setItem('kcc_scope_ver','v2');
+      if (!localStorage.getItem('kcc_scope_ver')) localStorage.setItem('kcc_scope_ver','v2');
       updateAuthBar(true);
+      scheduleProactiveRefresh();
       callback(null,accessToken);
     }
   });

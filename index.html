@@ -3901,6 +3901,119 @@ function buildEmailBody(addr, dateVal, inspector, folderLink, pdfLink) {
   return lines.join('\n');
 }
 
+// -- REPORT IMAGE DOWNSCALE (SIZE-BUDGETED) -- ported from roof-inspector.
+// The PhotoReport HTML embeds every photo as a base64 data-URI. KEYSTONE previews
+// that report inline through a byte-proxy with a hard cap (_driveRead.MAX_BYTES =
+// 4,500,000; a strict `> MAX_BYTES` fail dead-ends to a broken "open in Drive").
+// A many-photo report built straight from the capture-resolution dataURLs (800px @
+// 0.65) can blow past the cap. So the REPORT is built to a SIZE BUDGET: each report
+// group's photos are re-encoded stepping DOWN a (max_px, quality) ladder until the
+// assembled report's embedded bytes fit REPORT_SIZE_BUDGET (well below the hard cap).
+// The stored dataURL/compressedURL (what uploads to Drive as the full-res .jpg and
+// what the on-screen cards render) are deliberately left untouched — only the bytes
+// embedded into the report HTML shrink. Non-blocking: any decode/encode failure falls
+// back to the original dataURL so a report is never lost. Photos are NEVER dropped to
+// hit budget — if even the ladder floor is over cap the floor encode is kept and a
+// LOUD console warning fires.
+var REPORT_SIZE_BUDGET = 3900000;   // ~3.9MB target — under the 4.5MB KEYSTONE cap
+var REPORT_HARD_CAP    = 4500000;   // KEYSTONE/_driveRead MAX_BYTES — over this = "open in Drive"
+// Descending [max_px, quality] ladder. Step 0 is the historical top; each step shrinks
+// the longest edge AND the JPEG quality. The floor (150px/q0.13) is deliberately tiny so
+// even a large photo set is driven under the cap rather than embedded over it
+// (~4KB/photo at the floor ⇒ ~900 photos under 3.9MB). Photos are still never dropped.
+var REPORT_LADDER = [[1000,0.55],[820,0.50],[720,0.45],[640,0.42],[560,0.38],[500,0.35],[440,0.32],[380,0.28],[320,0.25],[260,0.22],[220,0.20],[190,0.17],[160,0.15],[150,0.13]];
+// Assembled-size proxy: base64 length dominates; add small constants for the per-photo
+// card markup (label/caption) and the fixed <head>/banners.
+var REPORT_CARD_OVERHEAD = 400;
+var REPORT_HTML_OVERHEAD = 4000;
+
+// Re-encode one data-URI to longest side <= maxPx at JPEG `quality`.
+// cb(smaller-data-URI | original). Preserves nothing but pixels — captions and labels
+// live in the HTML, not here.
+function encodeForReport(dataURL, maxPx, quality, cb) {
+  if (!dataURL || dataURL.indexOf('data:image') !== 0) { cb(dataURL); return; }
+  try {
+    var img = new Image();
+    img.onload = function(){
+      try {
+        var w = img.width, h = img.height;
+        var ratio = Math.min(1, maxPx / Math.max(w, h));
+        var cw = Math.max(1, Math.round(w * ratio));
+        var ch = Math.max(1, Math.round(h * ratio));
+        var canvas = document.createElement('canvas');
+        canvas.width = cw; canvas.height = ch;
+        var ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0, cw, ch);
+        var out = canvas.toDataURL('image/jpeg', quality);
+        // Keep whichever is actually smaller (a re-encode of an already-tiny image can
+        // grow it); never embed MORE bytes than we started with.
+        cb((out && out.length < dataURL.length) ? out : dataURL);
+      } catch(e) { cb(dataURL); }
+    };
+    img.onerror = function(){ cb(dataURL); };
+    img.src = dataURL;
+  } catch(e) { cb(dataURL); }
+}
+
+// Estimate the assembled report bytes for one report-group from its embedded image
+// data-URI lengths (base64 length is a fine proxy).
+function estimateReportBytes(group) {
+  var total = REPORT_HTML_OVERHEAD;
+  for (var k = 0; k < group.length; k++) {
+    var e = group[k];
+    var u = (e && (e.reportURL || e.dataURL)) || '';
+    total += u.length + REPORT_CARD_OVERHEAD;
+  }
+  return total;
+}
+
+// prepareReportImages: budget each report group independently. `groups` is an array of
+// photo-entry arrays (one array per report = one PhotoReport-*.html KEYSTONE previews on
+// its own). For each group, step DOWN REPORT_LADDER, re-encoding EVERY photo in the group
+// at that level, until the estimated assembled bytes fit REPORT_SIZE_BUDGET; the chosen
+// level's reportURLs are committed onto the SAME entry objects the submit pipeline reads.
+// If even the floor is over budget the floor encode is kept (photos are NEVER dropped) and
+// a LOUD console warning fires. Sequential decoding keeps each canvas short-lived (phone
+// memory). Back-compat: a flat entry list is accepted and treated as a single group.
+function prepareReportImages(groups, done) {
+  if (groups && groups.length && groups[0] && !Array.isArray(groups[0])) groups = [groups];
+  if (!groups || !groups.length) { done(); return; }
+  var gi = 0;
+  (function nextGroup(){
+    if (gi >= groups.length) { done(); return; }
+    var group = groups[gi++] || [];
+    if (!group.length) { nextGroup(); return; }
+    var li = 0;
+    (function tryLevel(){
+      var lvl = REPORT_LADDER[li];
+      var isFloor = (li >= REPORT_LADDER.length - 1);
+      li++;
+      var maxPx = lvl[0], quality = lvl[1];
+      var pi = 0;
+      (function nextPhoto(){
+        if (pi >= group.length) {
+          var sz = estimateReportBytes(group);
+          if (sz <= REPORT_SIZE_BUDGET) {
+            try { console.log('[report-budget] structure report ~' + sz + ' bytes (' + group.length + ' photos) at ' + maxPx + 'px/q' + quality + ' — under ' + REPORT_SIZE_BUDGET + ' budget.'); } catch(_){}
+            nextGroup(); return;                 // fits — committed, done with this group
+          }
+          if (isFloor) {
+            var over = (sz > REPORT_HARD_CAP) ? ' — STILL OVER the ' + REPORT_HARD_CAP + ' KEYSTONE inline cap; embedding at floor with all photos preserved'
+                                              : ' — over the ' + REPORT_SIZE_BUDGET + ' target but under the ' + REPORT_HARD_CAP + ' cap; will still preview';
+            try { console.warn('[report-budget] structure report ~' + sz + ' bytes at ladder floor ' + maxPx + 'px/q' + quality + over + '.'); } catch(_){}
+            nextGroup(); return;                 // floor already committed; never drop photos
+          }
+          try { console.log('[report-budget] structure report ~' + sz + ' bytes at ' + maxPx + 'px/q' + quality + ' > ' + REPORT_SIZE_BUDGET + ' budget — stepping down.'); } catch(_){}
+          tryLevel(); return;                    // re-encode the whole group at the next level
+        }
+        var e = group[pi++];
+        if (!e || !e.dataURL) { nextPhoto(); return; }
+        encodeForReport(e.dataURL, maxPx, quality, function(small){ e.reportURL = small; nextPhoto(); });
+      })();
+    })();
+  })();
+}
+
 function buildPhotoPDFHTML(photos, addr, dateVal, inspector) {
   var html = '<!DOCTYPE html><html><head><meta charset="UTF-8">'
     +'<style>body{font-family:Arial,sans-serif;margin:0;padding:14px;background:#fff;}'
@@ -3922,7 +4035,7 @@ function buildPhotoPDFHTML(photos, addr, dateVal, inspector) {
   var cur = '';
   photos.forEach(function(p){
     if (p.sectionLabel!==cur){if(cur)html+='</div>';html+='<div class="sec">'+p.sectionLabel+'</div><div class="grid">';cur=p.sectionLabel;}
-    html+='<div class="card"><img src="'+p.compressedURL+'"><div class="ci"><div class="cl">'+p.label+'</div>'+(p.caption?'<div class="cc">'+p.caption+'</div>':'')+'</div></div>';
+    html+='<div class="card"><img src="'+(p.reportURL||p.compressedURL||p.dataURL)+'"><div class="ci"><div class="cl">'+p.label+'</div>'+(p.caption?'<div class="cc">'+p.caption+'</div>':'')+'</div></div>';
   });
   if (cur) html+='</div>';
   html+='</body></html>';
@@ -4001,6 +4114,11 @@ function runSubmit(token) {
         (roofPhotos[sec.id]||[]).forEach(function(p,i){ roofArr.push({dataURL:p.dataURL,caption:p.caption,label:p.label,sectionLabel:sec.label,secId:sec.id,idx:i,compressedURL:p.dataURL}); });
       });
       if(roofArr.length === 0){ done(); return; }
+      // Size-budget the roof-level report BEFORE building its HTML: prepareReportImages
+      // steps DOWN REPORT_LADDER re-encoding every entry (sequentially — phone memory)
+      // until the assembled report fits REPORT_SIZE_BUDGET, stamping .reportURL on each
+      // roofArr entry that buildPhotoPDFHTML then reads. Never drops photos.
+      prepareReportImages(roofArr, function(){
       var roofPdfHTML = buildPhotoPDFHTML(roofArr, addr, dateVal, inspector);
       createDriveFolder('Roof Test Squares & Damage', inspFolderId, token, function(err, roofFolderId){
         var baseId = (!err && roofFolderId) ? roofFolderId : inspFolderId;
@@ -4031,6 +4149,7 @@ function runSubmit(token) {
         }
         createSectionFolders(0);
       });
+      }); // end prepareReportImages(roofArr)
     }
     var structIdx = 0;
     function processNextStruct(){
@@ -4052,6 +4171,11 @@ function runSubmit(token) {
           secPhotos.forEach(function(p, i){ structPhotos.push({dataURL:p.dataURL,caption:p.caption,label:p.label,sectionLabel:sec.label,secId:sec.id,facetIdx:_fi,idx:i,compressedURL:p.dataURL}); });
         });
         var csvContent = buildUserInputCSVFromStruct(s);
+        // Size-budget this structure's report BEFORE building its HTML (each structure =
+        // its own PhotoReport-*.html KEYSTONE previews). prepareReportImages stamps
+        // .reportURL on each structPhotos entry; buildPhotoPDFHTML then reads it. Sequential
+        // re-encode (phone memory); photos are never dropped.
+        prepareReportImages(structPhotos, function(){
         var pdfHTML = buildPhotoPDFHTML(structPhotos, addr, dateVal, inspector);
         var sectionFolderMap = {};
         var sectionsToCreate = [];
@@ -4083,6 +4207,7 @@ function runSubmit(token) {
           });
         }
         createSectionFolders(0);
+        }); // end prepareReportImages(structPhotos)
       });
     }
     processNextStruct();

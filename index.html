@@ -2528,6 +2528,16 @@ var CLIENT_ID = '253782351183-8pgd31f0ttse239isq7d0velvd5gcknb.apps.googleuserco
 var DRIVE_FOLDER_ID = '1OoAIRWoJw0WSaos3ieV-bUX96OR9NA5o';
 var SHEETS_URL = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vTh0tjaBLG5QzcExjVIUqyjBXBEb2hwe10fC82MmkQZvQ0xBCbPdnss9-IRMMalmwaj3o1YtEFiSwlB/pub?gid=0&single=true&output=csv';
 var NOTIFY_EMAIL = 'inspection@kosarekcc.com';
+// App version (bump on every functional change; no service worker, so this is a human marker).
+var APP_VERSION = 'flat-2026-08-15-fastintake';
+// FAST PHOTO INTAKE (2026-08-15) — direct-to-warm-PC upload, background Drive filing.
+// When true, step3 opens an intake job, streams the SAME compressed 800px dataURLs +
+// CSV/HTML artifacts DIRECTLY to the intake service (near-zero operator wait), then the
+// office-PC KEYSTONE worker files them into the job's permanent Drive folder in the
+// background. When false — OR if intake-open is unreachable — the legacy per-photo Google
+// Drive path runs unchanged (fallback, no data-loss path). See keystone/SHARED_PHOTO_INTAKE_DESIGN.md.
+var USE_FAST_INTAKE = true;
+var INTAKE_OPEN_URL = 'https://kcc-proxy.netlify.app/api/intake-open';
 // Schema bumped to v3 (July 22 2026) alongside PHOTO_DB_NAME: the per-facet
 // photo section set changed (added Roof Test Squares N/S/E/W Overview+Hail-Hits
 // buckets + Wind Damage + Other Damage). SAVE_KEY/PHOTO_DB_NAME bumped together
@@ -3735,6 +3745,80 @@ function makeFilePublic(fileId, token) {
   fetch('https://www.googleapis.com/drive/v3/files/'+fileId+'/permissions',{method:'POST',headers:{'Authorization':'Bearer '+token,'Content-Type':'application/json'},body:JSON.stringify({role:'reader',type:'anyone'})});
 }
 
+// ============================================================
+// FAST PHOTO INTAKE helpers (2026-08-15) — siblings of uploadBlobToDrive.
+// The transport swap ONLY: photos/artifacts go DIRECT to the warm-PC intake
+// service (via a Netlify-forwarded open, then browser-direct upload/finalize).
+// The photo model, compression, section labels, filenames + captions are
+// unchanged — intakeUploadPhoto sends the SAME already-compressed 800px dataURL
+// the legacy path turned into a Blob. The office-PC worker files them to Drive
+// in the background. Contract: keystone/SHARED_PHOTO_INTAKE_DESIGN.md.
+// ============================================================
+
+// Encode a text artifact (CSV / HTML) as a base64 data URL for the intake upload route.
+function intakeTextDataURL(content, mime){
+  return 'data:'+mime+';base64,'+btoa(unescape(encodeURIComponent(content||'')));
+}
+
+// intakeOpen — server-to-server open via the Netlify forwarder. POSTs the app's EXISTING
+// Google access token (the same kcc_token it already holds) + the folderPlan. Returns
+// {ok, jobid, upload_token, upload_url, finalize_url}. Hard timeout so a dead warm PC
+// falls back to the legacy Drive path rather than hanging the operator.
+function intakeOpen(folderPlan, cb){
+  var dateVal = v('f-date') || new Date().toISOString().split('T')[0];
+  var inspector = getInspectorName() || 'Inspector';
+  var body = {
+    accessToken: accessToken,
+    app: 'flat-roof-inspector',
+    address: { street: v('f-address'), cityStateZip: v('f-citystatezip') },
+    year: dateVal ? dateVal.substring(0,4) : new Date().getFullYear().toString(),
+    inspector: inspector,
+    inspectorEmail: v('f-inspector-email'),
+    date: dateVal,
+    folderPlan: folderPlan,
+    notifyEmail: v('f-sendto') || NOTIFY_EMAIL
+  };
+  var done = false;
+  var to = setTimeout(function(){ if(done) return; done = true; cb('intake_open_timeout'); }, 15000);
+  fetch(INTAKE_OPEN_URL, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)})
+    .then(function(r){ if(!r.ok) throw new Error('intake-open '+r.status); return r.json(); })
+    .then(function(j){
+      if(done) return; done = true; clearTimeout(to);
+      if(!j || !j.ok || !j.upload_url || !j.jobid){ cb('intake_open_bad_response'); return; }
+      cb(null, j);
+    })
+    .catch(function(e){ if(done) return; done = true; clearTimeout(to); cb(e); });
+}
+
+// intakeUploadPhoto — browser-DIRECT per-item upload, gated by the per-job upload_token
+// (X-Upload-Token). Sends the SAME compressed dataURL as the legacy blob upload. Also
+// carries CSV/HTML artifacts when photoObj.kind === 'artifact' (dataURL built by
+// intakeTextDataURL). Fires cb(null) on completion, cb(err) on network error.
+function intakeUploadPhoto(jobid, token, url, photoObj, cb){
+  var body = {
+    jobid: jobid, token: token,
+    structure: photoObj.structure, section: photoObj.section, shotIdx: photoObj.shotIdx,
+    filename: photoObj.filename, dataURL: photoObj.dataURL, kind: photoObj.kind || 'photo',
+    meta: {
+      caption: photoObj.caption || '', label: photoObj.label || '',
+      sectionLabel: photoObj.sectionLabel || '', structure: photoObj.structure,
+      facetIdx: (photoObj.facetIdx == null ? null : photoObj.facetIdx)
+    }
+  };
+  fetch(url, {method:'POST', headers:{'Content-Type':'application/json','X-Upload-Token':token}, body: JSON.stringify(body)})
+    .then(function(){ cb(null); })
+    .catch(function(e){ cb(e); });
+}
+
+// intakeFinalize — browser-DIRECT, token-gated. Stamps the staging job READY. The operator
+// is DONE here; the office-PC worker files everything to Drive in the background.
+function intakeFinalize(jobid, token, url, cb){
+  fetch(url, {method:'POST', headers:{'Content-Type':'application/json','X-Upload-Token':token}, body: JSON.stringify({jobid:jobid, token:token})})
+    .then(function(r){ return r.json().catch(function(){ return {}; }); })
+    .then(function(j){ cb(null, j); })
+    .catch(function(e){ cb(e); });
+}
+
 function sendGmail(to, subject, body, token, cc, callback) {
   var headers = 'To: '+to+'\r\nSubject: '+subject+'\r\nContent-Type: text/plain; charset=utf-8';
   if (cc) headers += '\r\nCc: '+cc;
@@ -4146,6 +4230,10 @@ function runSubmit(token) {
   // id travelled down the chain — which is how the inspection subfolder ended up in the
   // registry's Drive Folder column (BA/53), clobbering the master URL docs@ writes there.
   var masterFolderId = null;
+  // The ACTUAL inspection subfolder name created below (may carry a -RevN suffix). The fast
+  // intake worker ensurePath()es this exact name under the master so it files into the SAME
+  // folder the client created, never a divergent base-named one.
+  var inspectionSubfolderName = null;
   function step2(){
     setStepState('st-folder','active');
     searchDriveFolder(masterFolderName, DRIVE_FOLDER_ID, token, function(err, files){
@@ -4158,6 +4246,7 @@ function runSubmit(token) {
       // funnel — capture it once so it cannot drift from what was actually used.
       masterFolderId = parentId;
       findAvailableFolderName(inspFolderBase, parentId, token, function(availableName){
+        inspectionSubfolderName = availableName;
         createDriveFolder(availableName, parentId, token, function(err, inspId){
           if(err||!inspId){setStepState('st-folder','error');showDoneBtn();return;}
           setStepState('st-folder','done'); step3(inspId);
@@ -4168,6 +4257,122 @@ function runSubmit(token) {
   function step3(folderId){
     setStepState('st-photos','active');
     saveCurrentStructToDB();
+    if(USE_FAST_INTAKE){ step3FastIntake(folderId); return; }
+    step3Legacy(folderId);
+  }
+  // FAST INTAKE path — build the folderPlan from the SAME structure/facet + section lists
+  // the legacy path uses, open an intake job, stream each photo + the CSV/HTML artifacts
+  // DIRECTLY to the warm-PC service (in the SAME iteration order: per-structure, then
+  // roof-level), then finalize. On ANY open failure/timeout, fall back to step3Legacy so
+  // the operator still files (no data-loss path). Keeps prepareReportImages + the
+  // st-photos step-status UI. Email + registry stay client-side in step6 (DECISION A).
+  function step3FastIntake(folderId){
+    var structuresPlan = [];
+    structureList.forEach(function(s, i){
+      var fPhotos = (facetList[i] && facetList[i].photos) ? facetList[i].photos : (s.photos || {});
+      var sections = [];
+      FACET_PHOTO_SECTIONS.forEach(function(sec){ if(fPhotos[sec.id] && fPhotos[sec.id].length > 0) sections.push(sec.label); });
+      structuresPlan.push({ name: getStructName(s), sections: sections });
+    });
+    var folderPlan = {
+      masterName: masterFolderName,
+      inspectionSubfolder: inspectionSubfolderName || inspFolderBase,
+      structures: structuresPlan,
+      roofLevelFolder: 'Roof Test Squares & Damage'
+    };
+    intakeOpen(folderPlan, function(oErr, sess){
+      if(oErr || !sess || !sess.upload_url || !sess.jobid){
+        // Warm PC unreachable — fall back to the legacy client-side Drive path.
+        step3Legacy(folderId);
+        return;
+      }
+      var jobid = sess.jobid, utok = sess.upload_token, uurl = sess.upload_url, furl = sess.finalize_url;
+      var structIdx = 0;
+      function processNextStruct(){
+        if(structIdx >= structureList.length){ doRoofLevel(); return; }
+        var s = structureList[structIdx];
+        var structName = getStructName(s);
+        var structSlug = structName.replace(/[^a-zA-Z0-9\-]/g,'-').substring(0,40);
+        var _fi = structIdx;
+        var structPhotos = [];
+        FACET_PHOTO_SECTIONS.forEach(function(sec){
+          var secPhotos = (facetList[_fi] && facetList[_fi].photos[sec.id]) ? facetList[_fi].photos[sec.id] : [];
+          secPhotos.forEach(function(p, i){ structPhotos.push({dataURL:p.dataURL,caption:p.caption,label:p.label,sectionLabel:sec.label,secId:sec.id,facetIdx:_fi,idx:i,compressedURL:p.dataURL}); });
+        });
+        var csvContent = buildUserInputCSVFromStruct(s);
+        // Size-budget the report HTML exactly as the legacy path does (prepareReportImages
+        // stamps .reportURL that buildPhotoPDFHTML reads); the photos we UPLOAD are still
+        // the compressed dataURL, not the report-sized copy.
+        prepareReportImages(structPhotos, function(){
+          var pdfHTML = buildPhotoPDFHTML(structPhotos, addr, dateVal, inspector);
+          var pi = 0;
+          function nextPhoto(){
+            if(pi >= structPhotos.length){ uploadStructArtifacts(); return; }
+            var p = structPhotos[pi];
+            intakeUploadPhoto(jobid, utok, uurl, {
+              structure: structName, section: p.sectionLabel, shotIdx: pi,
+              filename: p.label + '.jpg', dataURL: p.compressedURL, kind: 'photo',
+              caption: p.caption, label: p.label, sectionLabel: p.sectionLabel, facetIdx: p.facetIdx
+            }, function(){ markPhotoUploaded2(p.secId, p.facetIdx, p.idx); pi++; nextPhoto(); });
+          }
+          function uploadStructArtifacts(){
+            intakeUploadPhoto(jobid, utok, uurl, {
+              structure: structName, section: '', shotIdx: 0,
+              filename: 'UserInput-'+slug+'-'+structSlug+'.csv',
+              dataURL: intakeTextDataURL(csvContent, 'text/csv'), kind: 'artifact',
+              caption: '', label: 'UserInput-'+slug+'-'+structSlug+'.csv', sectionLabel: '', facetIdx: null
+            }, function(){
+              intakeUploadPhoto(jobid, utok, uurl, {
+                structure: structName, section: '', shotIdx: 1,
+                filename: 'PhotoReport-'+slug+'-'+structSlug+'.html',
+                dataURL: intakeTextDataURL(pdfHTML, 'text/html'), kind: 'artifact',
+                caption: '', label: 'PhotoReport-'+slug+'-'+structSlug+'.html', sectionLabel: '', facetIdx: null
+              }, function(){ structIdx++; processNextStruct(); });
+            });
+          }
+          nextPhoto();
+        });
+      }
+      function doRoofLevel(){
+        var roofArr = [];
+        ROOF_PHOTO_SECTIONS.forEach(function(sec){
+          (roofPhotos[sec.id]||[]).forEach(function(p,i){ roofArr.push({dataURL:p.dataURL,caption:p.caption,label:p.label,sectionLabel:sec.label,secId:sec.id,idx:i,compressedURL:p.dataURL}); });
+        });
+        if(roofArr.length === 0){ finalizeIntake(); return; }
+        prepareReportImages(roofArr, function(){
+          var roofPdfHTML = buildPhotoPDFHTML(roofArr, addr, dateVal, inspector);
+          var pi = 0;
+          function nextPhoto(){
+            if(pi >= roofArr.length){ uploadRoofArtifact(); return; }
+            var p = roofArr[pi];
+            intakeUploadPhoto(jobid, utok, uurl, {
+              structure: '__roof__', section: p.sectionLabel, shotIdx: pi,
+              filename: p.label + '.jpg', dataURL: p.compressedURL, kind: 'photo',
+              caption: p.caption, label: p.label, sectionLabel: p.sectionLabel, facetIdx: null
+            }, function(){ markRoofPhotoUploaded(p.secId, p.idx); pi++; nextPhoto(); });
+          }
+          function uploadRoofArtifact(){
+            intakeUploadPhoto(jobid, utok, uurl, {
+              structure: '__roof__', section: '', shotIdx: 0,
+              filename: 'PhotoReport-'+slug+'-RoofLevel.html',
+              dataURL: intakeTextDataURL(roofPdfHTML, 'text/html'), kind: 'artifact',
+              caption: '', label: 'PhotoReport-'+slug+'-RoofLevel.html', sectionLabel: '', facetIdx: null
+            }, function(){ finalizeIntake(); });
+          }
+          nextPhoto();
+        });
+      }
+      function finalizeIntake(){
+        intakeFinalize(jobid, utok, furl, function(){
+          // Operator is DONE — the office-PC worker files to Drive in the background.
+          setStepState('st-photos','done'); setStepState('st-excel','done'); setStepState('st-pdf','done');
+          step6(folderId, 'https://drive.google.com/drive/folders/'+folderId);
+        });
+      }
+      processNextStruct();
+    });
+  }
+  function step3Legacy(folderId){
     // Upload the ROOF-LEVEL photos ONCE into the inspection folder (not per
     // struct/facet). Mirrors the per-struct upload flow (section subfolders +
     // per-photo blob upload + a PhotoReport HTML). Same hardening: each photo's

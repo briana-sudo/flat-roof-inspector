@@ -375,6 +375,14 @@ body{background:var(--bg);color:var(--text);font-family:sans-serif;font-size:16p
         <div class="ev-opt active" id="ev-yes" onclick="setEV('yes')">Yes</div>
       </div>
     </div>
+    <div class="field-row">
+      <div class="field-label">Roof access<div class="field-hint">Internal ladder to a roof hatch through the deck, or over the side? (drives the crew ladder/lift access flag)</div></div>
+      <select class="field-select" id="f-roofaccess" onchange="autoSave()">
+        <option value="">-- select --</option>
+        <option value="Internal (hatch through the deck)">Internal - hatch through the deck</option>
+        <option value="Over the side">Over the side - exterior ladder/lift</option>
+      </select>
+    </div>
   </div>
 </div>
 
@@ -3278,13 +3286,31 @@ function resolveReqTypeCol(token) {
     return r.json();
   }).then(function(d) {
     var hdr = (d && d.values && d.values[0]) || [];
-    REQTYPE_COL = -1;
+    REQTYPE_COL = -1; ROOFACCESS_COL = -1;
     for (var i = 0; i < hdr.length; i++) {
-      if (String(hdr[i] || '').trim() === 'Request Type') { REQTYPE_COL = i + 1; break; }
+      var h = String(hdr[i] || '').trim();
+      if (h === 'Request Type') REQTYPE_COL = i + 1;
+      if (h === 'Roof Access') ROOFACCESS_COL = i + 1;   // A9(c) — inspection captures crew roof access
     }
   }).catch(function() {
-    REQTYPE_COL = -1; // never block the registry write on this lookup
+    REQTYPE_COL = -1; ROOFACCESS_COL = -1; // never block the registry write on this lookup
   });
+}
+var ROOFACCESS_COL = -1; // 1-based sheet column for `Roof Access`; -1 = header not present
+
+// Files Roof Access (internal hatch vs over-the-side) into an already-written row, mirroring
+// writeReqTypeCell. Non-blocking + advisory — a failure never fails the submit. Used by the CREATE
+// path (the 62-wide append can't reach this END column). The UPDATE path writes it via addUpdate.
+function writeRoofAccessCell(token, targetRow, callback) {
+  var ra = v('f-roofaccess');
+  if (ROOFACCESS_COL < 1 || !ra || !targetRow) { callback(); return; }
+  fetch('https://sheets.googleapis.com/v4/spreadsheets/' + SHEETS_REGISTRY_ID +
+    '/values/Job%20Registry!' + col1basedToLetter(ROOFACCESS_COL) + targetRow +
+    '?valueInputOption=USER_ENTERED', {
+    method: 'PUT',
+    headers: {'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json'},
+    body: JSON.stringify({values: [[ra]]})
+  }).then(function(){ callback(); }).catch(function(){ callback(); });
 }
 
 // Files Request Type into an already-written row. Used by the CREATE path, whose
@@ -3453,7 +3479,9 @@ function createRegistryRow(token, rows, masterFolderLink, callback) {
     // it. The append picks the row, so recover it from updatedRange
     // ("Job Registry!A35:BJ35" -> 35). Non-blocking: the row is committed.
     var m = String((res && res.updates && res.updates.updatedRange) || '').match(/!\$?[A-Z]+\$?(\d+)/);
-    writeReqTypeCell(token, m ? m[1] : null, function(){ callback(null, jobId); });
+    writeReqTypeCell(token, m ? m[1] : null, function(){
+      writeRoofAccessCell(token, m ? m[1] : null, function(){ callback(null, jobId); });
+    });
   })
   .catch(function(e) { callback(e.message||String(e), null); });
 }
@@ -3993,6 +4021,7 @@ function buildRegistryUpdates(targetRow, masterFolderLink) {
   }
   var status = v('f-jobstatus'); if (status) addUpdate(9, status);
   if (REQTYPE_COL > 0) addUpdate(REQTYPE_COL, v('f-reqtype')); // Request Type (header-resolved)
+  if (ROOFACCESS_COL > 0 && v('f-roofaccess')) addUpdate(ROOFACCESS_COL, v('f-roofaccess')); // A9(c) Roof Access (header-resolved)
   var client = v('f-client'); if (client) addUpdate(11, client);
   var phone = v('f-phone'); if (phone) addUpdate(12, formatPhone(phone));
   var email = v('f-email'); if (email) addUpdate(13, email);

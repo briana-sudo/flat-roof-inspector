@@ -1142,6 +1142,29 @@ function buildEdgeCard(facetIdx, cardIdx, item) {
   termBrow.appendChild(tbLbl); termBrow.appendChild(tbInp); sideBBlock.appendChild(termBrow);
   wallBlock.appendChild(sideBBlock);
 
+  // \u1f512 WHERE THE WALL CROSSES, in feet from a named edge. ONE TAPE PULL, and nothing else can
+  // supply it. Owner 2026-11-19: *"We don't have a wall location. If you can't get from lidar.
+  // There isnt anything but photos and the inspection stating a wall."*  He is right and the
+  // search is over: the EagleView does not carry an interior wall at all, and the published
+  // height data is DSM minus DTM at about a foot of vertical spread -- a 12-18 inch wall is at
+  // or below its noise floor, and that raster lives on the storm box in the other lane anyway.
+  //
+  // So it is captured HERE or it does not exist. KCC-2026-035 recorded the wall's length, height,
+  // substrate, coping and treatment -- everything except the one number that says where it is --
+  // and the roll and board plans have to quote a WORST CASE because of it.
+  //
+  // Blank is allowed and means NOT MEASURED, which the plans already handle (they report the
+  // open-field count and the worst case side by side). It is never defaulted to the middle.
+  var wposRow = addWallRow('Distance from the first edge (ft)',
+    makeInp('not measured', item.wallPosFt, function(){
+      facetList[facetIdx].edges[cardIdx].wallPosFt=this.value; autoSave();
+    }));
+  var wposHint=document.createElement('div');
+  wposHint.style.cssText='font-size:11px;color:var(--muted);font-family:monospace;padding:0 0 6px 0;';
+  wposHint.textContent='Only for a wall that CROSSES the roof, not one on the outside edge. '
+    + 'Leave blank if you did not measure it.';
+  wallBlock.appendChild(wposHint);
+
   // Coping type (wall only)
   addWallRow('Coping type', makeDropdown([
     {val:'none',label:'None'},{val:'claytile',label:'Clay tile'},{val:'metal',label:'Metal'},{val:'other',label:'Other'}
@@ -2033,6 +2056,8 @@ function buildUserInputCSVFromStruct(s) {
           rows.push([ep,'Wall treatment','Selector',e.wallTreatA||'full','full/partial']);
           if(e.wallTreatA==='partial')rows.push([ep,'Termination height (ft)','Number',e.termHeightA||'0','ft']);
         }
+        // '' = NOT MEASURED. The yield reports a worst case rather than assuming a position.
+        rows.push([ep,'Wall position (ft)','Number',e.wallPosFt||'','ft']);
         rows.push([ep,'Coping type','Dropdown',e.copingType||'none','text']);
         if(e.copingType==='claytile'){
           rows.push([ep,'Coping condition','Selector',e.copingCondition||'good','good/damaged']);
